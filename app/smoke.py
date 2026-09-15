@@ -28,6 +28,9 @@ from app.integrations import (
     kdocs_authorize_url,
     kdocs_exchange_code,
     kdocs_refresh_access_token,
+    wps_authorize_url,
+    wps_exchange_code,
+    wps_refresh_user_token,
 )
 from app.mapping import FIELD_MAPPINGS, TECHNICAL_WPS_FIELDS
 
@@ -70,8 +73,14 @@ def _require_credentials(settings: Settings, command: str) -> bool:
         required = ("kdocs_app_id", "kdocs_app_key", "kdocs_refresh_token")
     elif command in {"kdocs-user", "kdocs-files"}:
         required = ("kdocs_access_token",)
+    elif command == "wps-auth":
+        required = ("wps_app_id", "wps_app_secret")
+    elif command == "wps-refresh":
+        required = ("wps_app_id", "wps_app_secret", "wps_user_refresh_token")
     elif settings.wps_provider == "kdocs":
         required = ("kdocs_access_token",)
+    elif settings.wps_token_mode == "user":
+        required = ("wps_app_id", "wps_user_access_token")
     else:
         required = ("wps_app_id", "wps_app_secret")
     missing = [name for name in required if not getattr(settings, name)]
@@ -138,6 +147,7 @@ def _await_oauth_callback(redirect_uri: str, state: str, timeout_seconds: int = 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802 - http.server handler API
             query = parse_qs(urlparse(self.path).query)
+            captured["query_keys"] = ",".join(sorted(query))
             if query.get("code"):
                 captured["code"] = query["code"][0]
                 captured["state"] = query.get("state", [""])[0]
@@ -158,18 +168,19 @@ def _await_oauth_callback(redirect_uri: str, state: str, timeout_seconds: int = 
     server = HTTPServer((parsed.hostname or "127.0.0.1", parsed.port or 80), Handler)
     server.timeout = 1
     try:
-        while not captured and time.monotonic() < deadline:
+        while "code" not in captured and "error" not in captured and time.monotonic() < deadline:
             server.handle_request()
     finally:
         server.server_close()
     if "error" in captured:
-        raise ValueError(f"authorization callback reported error: {captured['error']}")
-    if captured.get("state") != state:
-        raise ValueError("authorization callback state mismatch")
+        raise ValueError(f"authorization callback reported error: {captured['error']} (query keys: {captured.get('query_keys', '')})")
+    # The platform may omit state on the callback; only compare it when it was echoed back.
+    if captured.get("state") and captured["state"] != state:
+        raise ValueError(f"authorization callback state mismatch (query keys: {captured.get('query_keys', '')})")
     return captured.get("code")
 
 
-def _run_kdocs_auth(settings: Settings, code: str | None, env_file: str) -> int:
+def _run_kdocs_auth(settings: Settings, code: str | None, env_file: str, timeout_seconds: int) -> int:
     try:
         if code:
             tokens = kdocs_exchange_code(settings, code)
@@ -181,7 +192,7 @@ def _run_kdocs_auth(settings: Settings, code: str | None, env_file: str) -> int:
                 "redirect_uri": settings.kdocs_redirect_uri,
                 "hint": "在浏览器打开该链接并用『目标文件所属的 WPS 账号』授权；等待回调中…",
             })
-            captured = _await_oauth_callback(settings.kdocs_redirect_uri, state)
+            captured = _await_oauth_callback(settings.kdocs_redirect_uri, state, timeout_seconds=timeout_seconds)
             if not captured:
                 _emit({
                     "status": "BLOCKED",
@@ -228,6 +239,65 @@ def _file_summary(file: dict[str, object]) -> dict[str, object]:
     return {"id": ident, "name": name}
 
 
+def _run_wps_auth(settings: Settings, code: str | None, env_file: str, timeout_seconds: int) -> int:
+    if settings.wps_provider != "wps365":
+        _emit({"status": "BLOCKED", "error": "wps-auth requires WPS_PROVIDER=wps365"})
+        return 2
+    try:
+        if code:
+            tokens = wps_exchange_code(settings, code)
+        else:
+            state = secrets.token_hex(16)
+            _emit({
+                "status": "AUTH_URL",
+                "url": wps_authorize_url(settings, state),
+                "redirect_uri": settings.wps_redirect_uri,
+                "hint": "在浏览器打开该链接并用『目标文件所属的 WPS 账号』授权；等待回调中…",
+            })
+            captured = _await_oauth_callback(settings.wps_redirect_uri, state, timeout_seconds=timeout_seconds)
+            if not captured:
+                _emit({
+                    "status": "BLOCKED",
+                    "error": "未捕获到授权回调；WPS_REDIRECT_URI 必须是 http://localhost:<port>/... 且已在『开发者后台 > 安全配置 > 用户授权回调配置』登记，或改用 --code 手动传入",
+                })
+                return 2
+            tokens = wps_exchange_code(settings, captured)
+    except Exception as exc:
+        _emit({"status": "AUTH_FAILED", "error": str(exc)[:500]})
+        return 1
+    path = Path(env_file)
+    updates = {
+        "WPS_TOKEN_MODE": "user",
+        "WPS_USER_ACCESS_TOKEN": tokens["access_token"],
+    }
+    if tokens["refresh_token"]:
+        updates["WPS_USER_REFRESH_TOKEN"] = tokens["refresh_token"]
+    upsert_env_values(path, updates)
+    _emit({
+        "status": "AUTH_OK",
+        "env_file": str(path.resolve()),
+        "access_token_length": len(tokens["access_token"]),
+        "refresh_token_written": bool(tokens["refresh_token"]),
+        "hint": "access_token 有效期 2 小时；过期后运行 wps-refresh（refresh_token 链最长 365 天）",
+    })
+    return 0
+
+
+def _run_wps_refresh(settings: Settings, env_file: str) -> int:
+    try:
+        tokens = wps_refresh_user_token(settings)
+    except Exception as exc:
+        _emit({"status": "REFRESH_FAILED", "error": str(exc)[:500]})
+        return 1
+    path = Path(env_file)
+    updates = {"WPS_USER_ACCESS_TOKEN": tokens["access_token"]}
+    if tokens["refresh_token"]:
+        updates["WPS_USER_REFRESH_TOKEN"] = tokens["refresh_token"]
+    upsert_env_values(path, updates)
+    _emit({"status": "REFRESH_OK", "env_file": str(path.resolve()), "access_token_length": len(tokens["access_token"])})
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.smoke", description="Run read-only WPS/kdocs integration checks")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -244,10 +314,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     auth_parser = sub.add_parser("kdocs-auth", help="One-time kdocs user OAuth bootstrap; writes tokens to .env")
     auth_parser.add_argument("--code", help="Authorization code captured manually (skips the local callback server)")
     auth_parser.add_argument("--env-file", default=".env")
+    auth_parser.add_argument("--timeout", type=int, default=600, help="Seconds to wait for the localhost callback (default 600)")
     refresh_parser = sub.add_parser("kdocs-refresh", help="Refresh the kdocs access_token via refresh_token")
     refresh_parser.add_argument("--env-file", default=".env")
     sub.add_parser("kdocs-user", help="(kdocs) Validate the access_token via user/basic")
     sub.add_parser("kdocs-files", help="(kdocs) List personal files to discover file tokens")
+    wps_auth_parser = sub.add_parser("wps-auth", help="(wps365) User OAuth bootstrap; writes WPS_USER_* tokens and WPS_TOKEN_MODE=user to .env")
+    wps_auth_parser.add_argument("--code", help="Authorization code captured manually (skips the local callback server)")
+    wps_auth_parser.add_argument("--env-file", default=".env")
+    wps_auth_parser.add_argument("--timeout", type=int, default=600, help="Seconds to wait for the localhost callback (default 600)")
+    wps_refresh_parser = sub.add_parser("wps-refresh", help="(wps365) Refresh the user access_token via refresh_token")
+    wps_refresh_parser.add_argument("--env-file", default=".env")
+    link_parser = sub.add_parser("wps-link", help="(wps365) Resolve a /l/ short link to file metadata via links/meta")
+    link_parser.add_argument("--link-id", required=True)
     args = parser.parse_args(argv)
 
     settings = Settings.from_env()
@@ -264,14 +343,37 @@ def main(argv: Sequence[str] | None = None) -> int:
         except Exception as exc:
             _emit({"status": "TOKEN_FAILED", "error": str(exc)[:500]})
             return 1
-        _emit({"status": "TOKEN_OK", "token_length": len(token), "expires_at": client.cache.expires_at.isoformat()})
+        expires = client.cache.expires_at.isoformat() if client.cache.expires_at else None
+        _emit({
+            "status": "TOKEN_OK",
+            "token_mode": settings.wps_token_mode,
+            "token_length": len(token),
+            "expires_at": expires,
+            "hint": None if expires else "user token has a 2h lifetime; verify with wps-link or sheets",
+        })
         return 0
 
     if args.command == "kdocs-auth":
-        return _run_kdocs_auth(settings, args.code, args.env_file)
+        return _run_kdocs_auth(settings, args.code, args.env_file, args.timeout)
 
     if args.command == "kdocs-refresh":
         return _run_kdocs_refresh(settings, args.env_file)
+
+    if args.command == "wps-auth":
+        return _run_wps_auth(settings, args.code, args.env_file, args.timeout)
+
+    if args.command == "wps-refresh":
+        return _run_wps_refresh(settings, args.env_file)
+
+    if args.command == "wps-link":
+        client = WpsOpenApiClient(settings)
+        try:
+            meta = client.resolve_link(args.link_id)
+        except Exception as exc:
+            _emit({"status": "LINK_FAILED", "error": str(exc)[:500]})
+            return 1
+        _emit({"status": "OK", "link_id": args.link_id, "meta": meta})
+        return 0
 
     if args.command == "kdocs-user":
         try:

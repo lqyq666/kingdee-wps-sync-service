@@ -72,6 +72,11 @@ class Settings:
     wps_token_url: str
     wps_kso_signing_enabled: bool
     wps_kso_secret: str
+    wps_token_mode: str
+    wps_user_access_token: str
+    wps_user_refresh_token: str
+    wps_redirect_uri: str
+    wps_auth_scopes: str
     kdocs_base_url: str
     kdocs_app_id: str
     kdocs_app_key: str
@@ -113,6 +118,11 @@ class Settings:
             wps_token_url=_value("WPS_TOKEN_URL", "https://openapi.wps.cn/oauth2/token"),
             wps_kso_signing_enabled=_bool("WPS_KSO_SIGNING_ENABLED", False),
             wps_kso_secret=_value("WPS_KSO_SECRET"),
+            wps_token_mode=_value("WPS_TOKEN_MODE", "app").lower(),
+            wps_user_access_token=_value("WPS_USER_ACCESS_TOKEN"),
+            wps_user_refresh_token=_value("WPS_USER_REFRESH_TOKEN"),
+            wps_redirect_uri=_value("WPS_REDIRECT_URI", "http://localhost:8931/callback"),
+            wps_auth_scopes=_value("WPS_AUTH_SCOPES", "kso.dbsheet.readwrite,kso.file_link.readwrite"),
             wps_provider=_value("WPS_PROVIDER", "wps365").lower(),
             kdocs_base_url=_value("KDOCS_BASE_URL", "https://developer.kdocs.cn"),
             kdocs_app_id=_value("KDOCS_APP_ID"),
@@ -140,6 +150,8 @@ def validate_runtime_configuration(settings: Settings) -> None:
         raise ConfigurationError("WPS_PROVIDER must be 'wps365' or 'kdocs'")
     if settings.kdocs_api_family not in {"dbt", "ksheet"}:
         raise ConfigurationError("KDOCS_API_FAMILY must be 'dbt' or 'ksheet'")
+    if settings.wps_token_mode not in {"app", "user"}:
+        raise ConfigurationError("WPS_TOKEN_MODE must be 'app' or 'user'")
 
     missing: list[str] = []
     if settings.kingdee_mode == "real":
@@ -151,6 +163,10 @@ def validate_runtime_configuration(settings: Settings) -> None:
         missing.extend(_missing(settings, (
             "wps_app_id", "wps_app_secret", "wps_file_id", "wps_sheet_id",
         )))
+        if settings.wps_token_mode == "user":
+            # User tokens bypass the app-level company-doc edition wall; they act with
+            # the authorizing user's own file permissions.
+            missing.extend(_missing(settings, ("wps_user_access_token",)))
     if settings.wps_mode == "real" and settings.wps_provider == "kdocs":
         # The kdocs record APIs authenticate with a user OAuth access token; app_id/app_key
         # are only needed by the one-time `kdocs-auth` bootstrap, not at sync runtime.

@@ -192,6 +192,12 @@ class WpsOpenApiClient:
         self.cache = TokenCache()
 
     def _token(self) -> str:
+        if self.settings.wps_token_mode == "user":
+            # User access_token acts with the authorizing user's file permissions
+            # (2h lifetime; refresh via `python -m app.smoke wps-refresh`).
+            if not self.settings.wps_user_access_token:
+                raise ValueError("WPS_TOKEN_MODE=user requires WPS_USER_ACCESS_TOKEN")
+            return self.settings.wps_user_access_token
         if self.cache.valid():
             assert self.cache.token is not None
             return self.cache.token
@@ -293,6 +299,15 @@ class WpsOpenApiClient:
         if not isinstance(data, dict):
             raise ValueError("WPS response body must be a JSON object")
         return data
+
+    def resolve_link(self, link_id: str) -> dict[str, object]:
+        """Read the documented GET /v7/links/{link_id}/meta (kso.file_link.readwrite).
+
+        Returns the raw data object so the smoke CLI can surface file_id for a /l/ short
+        link, which the browser address bar never expands.
+        """
+        request_uri = f"/v7/links/{quote(link_id, safe='')}/meta"
+        return self._data_object(self._get_json(request_uri))
 
     def get_schema(self) -> list[WpsSheetSchema]:
         """Read the documented GET /v7/coop/dbsheet/{file_id}/schema (kso.dbsheet.read)."""
@@ -532,6 +547,64 @@ class KdocsOpenApiClient:
         if not isinstance(files, list):
             raise ValueError("kdocs personal files response must contain a files list; verify the API contract")
         return [dict(file) for file in files if isinstance(file, dict)]
+
+
+def wps_authorize_url(settings: Settings, state: str) -> str:
+    """Build the WPS 365 user-authorization page URL per GET /oauth2/auth."""
+    return (
+        f"{settings.wps_base_url.rstrip('/')}/oauth2/auth"
+        f"?client_id={quote(settings.wps_app_id, safe='')}"
+        "&response_type=code"
+        f"&redirect_uri={quote(settings.wps_redirect_uri, safe='')}"
+        f"&scope={quote(settings.wps_auth_scopes, safe='')}"
+        f"&state={quote(state, safe='')}"
+    )
+
+
+def _wps_user_token_payload(data: dict[str, object]) -> dict[str, str]:
+    if not isinstance(data, dict) or data.get("code") not in {None, 0}:
+        code = data.get("code") if isinstance(data, dict) else "?"
+        raise ValueError(f"WPS token endpoint error {code}: {data.get('msg', 'unknown error') if isinstance(data, dict) else 'invalid response'}")
+    token = data.get("access_token")
+    if not isinstance(token, str) or not token:
+        raise ValueError("WPS token response must contain access_token; verify app credentials and code")
+    refresh = data.get("refresh_token")
+    return {"access_token": token, "refresh_token": str(refresh or "")}
+
+
+def wps_exchange_code(settings: Settings, code: str, client: httpx.Client | None = None) -> dict[str, str]:
+    """Exchange a user-authorization code per POST /oauth2/token (form, grant_type=authorization_code)."""
+    http = client or httpx.Client(timeout=30)
+    response = http.post(
+        settings.wps_token_url,
+        data={
+            "grant_type": "authorization_code",
+            "client_id": settings.wps_app_id,
+            "client_secret": settings.wps_app_secret,
+            "code": code,
+            "redirect_uri": settings.wps_redirect_uri,
+        },
+    )
+    response.raise_for_status()
+    return _wps_user_token_payload(response.json())
+
+
+def wps_refresh_user_token(settings: Settings, client: httpx.Client | None = None) -> dict[str, str]:
+    """Refresh the user access_token per POST /oauth2/token (form, grant_type=refresh_token)."""
+    if not settings.wps_user_refresh_token:
+        raise ValueError("WPS_USER_REFRESH_TOKEN is required to refresh the user access token")
+    http = client or httpx.Client(timeout=30)
+    response = http.post(
+        settings.wps_token_url,
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": settings.wps_user_refresh_token,
+            "client_id": settings.wps_app_id,
+            "client_secret": settings.wps_app_secret,
+        },
+    )
+    response.raise_for_status()
+    return _wps_user_token_payload(response.json())
 
 
 def kdocs_authorize_url(settings: Settings, state: str) -> str:

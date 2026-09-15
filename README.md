@@ -74,6 +74,12 @@ python -m app.smoke sheets --file-id <file_id>                           # 列�
 python -m app.smoke fields --file-id <file_id> [--sheet-id <id>]         # 核验 17 业务字段 + 3 技术字段是否就绪
 python -m app.smoke lookup --file-id <file_id> --sheet-id <id> --sync-key <key>   # 按 _sync_key 回查，演练对账
 
+# wps365 用户授权（绕开体验版“企业文档”应用权限墙：以授权用户本人的文件权限调用）
+python -m app.smoke wps-auth                                             # 一次性授权引导，token 自动写入 .env（支持 --code 手动传入）
+python -m app.smoke wps-link --link-id <短链ID>                          # 解析 /l/ 短链 → file_id（links/meta，只读）
+python -m app.smoke wps-refresh                                          # access_token 过期（2 小时）后刷新
+# 授权后 sheets/fields/lookup 复用同一套命令（WPS_TOKEN_MODE=user）
+
 # WPS_PROVIDER=kdocs（金山文档开放平台，集成应用 + 用户 OAuth）
 python -m app.smoke kdocs-auth                                           # 一次性授权引导，token 自动写入 .env（支持 --code 手动传入）
 python -m app.smoke kdocs-user                                           # 验证 access_token（user/basic）

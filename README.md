@@ -49,7 +49,7 @@ docker compose down
 - PostgreSQL 持久化同步记录、任务锁、运行审计、checkpoint 与 DLQ。
 - 指数退避 + full jitter 重试，失败写入 DLQ，可显式 replay。
 - JSON 结构化日志、Prometheus 指标、liveness/readiness 与可选 webhook 失败告警。
-- WPS token 内存缓存和可选 KSO-1 HMAC 签名钩子；真实协议的 canonicalization 必须以租户提供的 WPS 文档为准。
+- WPS 365 自建应用 token 内存缓存与可选 KSO-1 签名，按 WPS 官方 `client_credentials`、`X-Kso-Date`、`X-Kso-Authorization` 合同实现；真实租户仍未发起调用。
 
 ## 配置与真实联调边界
 

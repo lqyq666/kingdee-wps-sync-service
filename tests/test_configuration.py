@@ -21,3 +21,16 @@ def test_real_wps_mode_reports_all_required_missing_items(settings):
 
 def test_mock_modes_are_valid_without_real_credentials(settings):
     validate_runtime_configuration(settings)
+
+
+def test_real_wps_mode_accepts_the_documented_required_configuration(settings):
+    validate_runtime_configuration(
+        replace(
+            settings,
+            wps_mode="real",
+            wps_app_id="AK-test",
+            wps_app_secret="test-secret",
+            wps_file_id="file-id",
+            wps_sheet_id="sheet-id",
+        )
+    )

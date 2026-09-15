@@ -2,7 +2,7 @@
 
 ## 当前状态：BLOCKED / REQUIRES REAL CREDENTIALS
 
-当前没有任何客户真实 Kingdee API 授权、字段元数据、WPS AppID/AppSecret、file_id 或 sheet_id。不要把 `.env`、token、私钥、抓包内容或客户数据提交到 Git，也不要在聊天中粘贴 Secret。
+当前仓库没有任何客户真实 Kingdee API 授权、字段元数据，也没有已获授权的 WPS AppSecret、file_id 或 sheet_id。不要把 `.env`、token、私钥、抓包内容或客户数据提交到 Git，也不要在聊天中粘贴 Secret。
 
 ## Kingdee 需由客户/实施方提供
 
@@ -16,13 +16,13 @@
 
 ## WPS 需由客户管理员提供
 
-1. WPS 365 应用的 AppID/AppSecret、scope、授权方式、token endpoint 和失效时间语义。
-2. 销售数据详情表的 `file_id`、`sheet_id`，以及创建/批量更新记录 endpoint 的正式文档和脱敏成功响应。
+1. WPS 365 企业自建应用的 AppID/AppSecret、`kso.dbsheet.readwrite` scope、管理员授权状态，以及是否开启“接口签名”。
+2. 销售数据详情表的 `file_id`、`sheet_id`，以及创建/更新记录的正式文档和脱敏成功响应。当前官方自建应用 token 使用 `POST https://openapi.wps.cn/oauth2/token` + `client_credentials`；记录写入使用 WPS 365 OpenAPI 的 DBSheet create/update 路径。
 3. API 的批量限制、限流策略、错误码、请求幂等策略，以及有无按字段查询记录能力。
 4. 三个驾驶舱仅消费业务字段的确认；隐藏技术字段不得在驾驶舱展示或聚合。
 5. KSO-1（如要求）的官方签名规范和测试租户。
 
-服务会在 `WPS_MODE != mock` 时检查 `WPS_BASE_URL`、`WPS_APP_ID`、`WPS_APP_SECRET`、`WPS_FILE_ID`、`WPS_SHEET_ID`、`WPS_TOKEN_URL` 与 `WPS_RECORDS_URL`。缺一个即明确失败，不会尝试真实请求。
+服务会在 `WPS_MODE != mock` 时检查 `WPS_APP_ID`、`WPS_APP_SECRET`、`WPS_FILE_ID` 与 `WPS_SHEET_ID`。缺一个即明确失败，不会尝试真实请求。WPS 官方基础地址与 token 地址已有安全默认值；`WPS_KSO_SIGNING_ENABLED=true` 时，服务以 AppSecret 生成官方 KSO-1 签名。
 
 ## WPS 销售主表必须新增的隐藏文本字段
 

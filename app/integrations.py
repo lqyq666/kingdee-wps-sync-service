@@ -8,7 +8,9 @@ import json
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from typing import Protocol
+from urllib.parse import quote
 
 import httpx
 
@@ -21,8 +23,25 @@ def parse_timestamp(value: str) -> datetime:
 
 
 def kso1_signature(secret: str, payload: bytes) -> str:
-    """Optional HMAC hook; tenant-specific KSO-1 canonicalization must be confirmed."""
+    """Legacy Kingdee contract hook; its actual signature contract is tenant-specific."""
     return hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
+
+
+def wps_kso1_authorization(
+    *,
+    app_id: str,
+    app_secret: str,
+    method: str,
+    request_uri: str,
+    content_type: str,
+    kso_date: str,
+    request_body: bytes,
+) -> str:
+    """Build WPS KSO-1 authorization from its documented canonical string."""
+    body_hash = hashlib.sha256(request_body).hexdigest() if request_body else ""
+    canonical = f"KSO-1{method.upper()}{request_uri}{content_type}{kso_date}{body_hash}"
+    signature = hmac.new(app_secret.encode("utf-8"), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"KSO-1 {app_id}:{signature}"
 
 
 class KingdeeClient(Protocol):
@@ -116,7 +135,7 @@ class TokenCache:
 
 
 class WpsOpenApiClient:
-    """WPS client with token caching and configurable tenant API endpoints."""
+    """WPS 365 self-built-app client for documented DBSheet create/update APIs."""
     def __init__(self, settings: Settings, client: httpx.Client | None = None):
         self.settings = settings
         self.client = client or httpx.Client(timeout=30)
@@ -126,12 +145,14 @@ class WpsOpenApiClient:
         if self.cache.valid():
             assert self.cache.token is not None
             return self.cache.token
-        payload = {"app_id": self.settings.wps_app_id, "app_secret": self.settings.wps_app_secret}
-        encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        headers = {"Content-Type": "application/json"}
-        if self.settings.wps_kso_secret:
-            headers["X-KSO-1-Signature"] = kso1_signature(self.settings.wps_kso_secret, encoded)
-        response = self.client.post(self.settings.wps_token_url, content=encoded, headers=headers)
+        response = self.client.post(
+            self.settings.wps_token_url,
+            data={
+                "grant_type": "client_credentials",
+                "client_id": self.settings.wps_app_id,
+                "client_secret": self.settings.wps_app_secret,
+            },
+        )
         response.raise_for_status()
         data = response.json()
         token = data.get("access_token")
@@ -144,44 +165,79 @@ class WpsOpenApiClient:
         )
         return token
 
-    def _headers(self, payload: bytes) -> dict[str, str]:
+    def _headers(self, *, method: str, request_uri: str, payload: bytes) -> dict[str, str]:
         headers = {
             "Authorization": f"Bearer {self._token()}",
             "Content-Type": "application/json",
-            "X-WPS-File-Id": self.settings.wps_file_id,
-            "X-WPS-Sheet-Id": self.settings.wps_sheet_id,
         }
-        if self.settings.wps_kso_secret:
-            headers["X-KSO-1-Signature"] = kso1_signature(self.settings.wps_kso_secret, payload)
+        if self.settings.wps_kso_signing_enabled:
+            kso_date = format_datetime(datetime.now(UTC), usegmt=True)
+            signing_secret = self.settings.wps_kso_secret or self.settings.wps_app_secret
+            headers["X-Kso-Date"] = kso_date
+            headers["X-Kso-Authorization"] = wps_kso1_authorization(
+                app_id=self.settings.wps_app_id,
+                app_secret=signing_secret,
+                method=method,
+                request_uri=request_uri,
+                content_type=headers["Content-Type"],
+                kso_date=kso_date,
+                request_body=payload,
+            )
         return headers
 
     @staticmethod
-    def _ids(data: dict[str, object], expected_keys: list[str]) -> dict[str, str]:
-        records = data.get("records", data.get("data", []))
+    def _ids(data: dict[str, object], submitted_records: list[dict[str, object]]) -> dict[str, str]:
+        if data.get("code") not in {None, 0}:
+            raise ValueError(f"WPS API error {data.get('code')}: {data.get('msg', 'unknown error')}")
+        result = data.get("data", data)
+        if not isinstance(result, dict):
+            raise ValueError("WPS response data must be an object")
+        records = result.get("records")
         if not isinstance(records, list):
             raise ValueError("WPS response must contain a records list; verify tenant API contract")
         ids: dict[str, str] = {}
-        for record in records:
+        if len(records) != len(submitted_records):
+            raise ValueError("WPS response record count does not match the submitted batch")
+        for source, record in zip(submitted_records, records, strict=True):
             if isinstance(record, dict) and isinstance(record.get("id"), str):
-                sync_key = record.get("sync_key") or record.get("_sync_key")
-                if isinstance(sync_key, str):
-                    ids[sync_key] = record["id"]
-        if set(ids) != set(expected_keys):
-            raise ValueError("WPS response must return id and sync_key for every submitted record")
+                ids[str(source["_sync_key"])] = record["id"]
+        expected_keys = {str(record["_sync_key"]) for record in submitted_records}
+        if set(ids) != expected_keys:
+            raise ValueError("WPS response must return an id for every submitted record")
         return ids
 
-    def create_records(self, records: list[dict[str, object]]) -> dict[str, str]:
-        encoded = json.dumps({"records": [{"fields": record} for record in records]}, ensure_ascii=False).encode("utf-8")
-        response = self.client.post(self.settings.wps_records_url, content=encoded, headers=self._headers(encoded))
+    def _records_uri(self, action: str) -> str:
+        file_id = quote(self.settings.wps_file_id, safe="")
+        return f"/v7/coop/dbsheet/{file_id}/sheets/{self.settings.wps_sheet_id}/records/{action}"
+
+    def _post_records(self, action: str, payload: dict[str, object], submitted_records: list[dict[str, object]]) -> dict[str, str]:
+        request_uri = self._records_uri(action)
+        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        response = self.client.post(
+            f"{self.settings.wps_base_url.rstrip('/')}{request_uri}",
+            content=encoded,
+            headers=self._headers(method="POST", request_uri=request_uri, payload=encoded),
+        )
         response.raise_for_status()
-        return self._ids(response.json(), [str(record["_sync_key"]) for record in records])
+        return self._ids(response.json(), submitted_records)
+
+    def create_records(self, records: list[dict[str, object]]) -> dict[str, str]:
+        payload = {
+            "prefer_id": False,
+            "records": [{"fields_value": json.dumps(record, ensure_ascii=False, separators=(",", ":"))} for record in records],
+        }
+        return self._post_records("create", payload, records)
 
     def update_records(self, records: list[tuple[str, dict[str, object]]]) -> dict[str, str]:
-        payload = {"records": [{"id": remote_id, "fields": fields} for remote_id, fields in records]}
-        encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        response = self.client.patch(self.settings.wps_records_url, content=encoded, headers=self._headers(encoded))
-        response.raise_for_status()
-        return self._ids(response.json(), [str(fields["_sync_key"]) for _, fields in records])
+        submitted_records = [fields for _, fields in records]
+        payload = {
+            "prefer_id": False,
+            "records": [
+                {"id": remote_id, "fields_value": json.dumps(fields, ensure_ascii=False, separators=(",", ":"))}
+                for remote_id, fields in records
+            ],
+        }
+        return self._post_records("update", payload, submitted_records)
 
 
 def build_kingdee_client(settings: Settings) -> KingdeeClient:

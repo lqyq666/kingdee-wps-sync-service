@@ -1,6 +1,6 @@
 # 集成状态
 
-更新时间：2026-09-14
+更新时间：2026-09-15
 
 ## 可验证完成：Mock 环境
 
@@ -18,8 +18,8 @@
 | 集成 | 状态 | 原因 |
 | --- | --- | --- |
 | Kingdee OpenAPI | **BLOCKED / REQUIRES REAL CREDENTIALS** | 没有客户 API 授权、端点合同、业务单据/字段元数据 |
-| WPS 365 OpenAPI | **BLOCKED / REQUIRES REAL CREDENTIALS** | 没有 AppID、AppSecret、file_id、sheet_id、端点合同 |
-| KSO-1 | **BLOCKED / REQUIRES REAL CREDENTIALS** | 已保留可选签名钩子；真实 canonicalization 尚未拿到官方租户文档验证 |
+| WPS 365 OpenAPI | **BLOCKED / REQUIRES REAL CREDENTIALS** | 仓库未配置已获授权的 AppSecret、file_id、sheet_id，且尚未有真实租户调用证据 |
+| KSO-1 | **BLOCKED / REQUIRES REAL CREDENTIALS** | 已按 WPS 官方签名说明实现；尚未持真实应用凭据发送请求验证 |
 | 真实字段映射 | **BLOCKED / REQUIRES REAL METADATA** | 17 个 WPS 目标字段固定，所有真实 source 字段刻意留空，禁止猜测 |
 
 因此，本仓库可以被表述为“mock 已验证的生产级同步框架”；禁止把 mock 验收描述成真实 API 联调通过。

@@ -30,6 +30,15 @@ def _float(name: str, default: float) -> float:
         raise ConfigurationError(f"{name} must be a number, got {value!r}") from exc
 
 
+def _bool(name: str, default: bool = False) -> bool:
+    value = _value(name, str(default)).lower()
+    if value in {"true", "1", "yes"}:
+        return True
+    if value in {"false", "0", "no"}:
+        return False
+    raise ConfigurationError(f"{name} must be true or false, got {value!r}")
+
+
 @dataclass(frozen=True)
 class Settings:
     database_url: str
@@ -58,7 +67,7 @@ class Settings:
     wps_file_id: str
     wps_sheet_id: str
     wps_token_url: str
-    wps_records_url: str
+    wps_kso_signing_enabled: bool
     wps_kso_secret: str
 
     @classmethod
@@ -84,13 +93,13 @@ class Settings:
             kingdee_source_id_field=_value("KINGDEE_SOURCE_ID_FIELD"),
             kingdee_source_modified_at_field=_value("KINGDEE_SOURCE_MODIFIED_AT_FIELD"),
             kingdee_kso_secret=_value("KINGDEE_KSO_SECRET"),
-            wps_base_url=_value("WPS_BASE_URL"),
+            wps_base_url=_value("WPS_BASE_URL", "https://openapi.wps.cn"),
             wps_app_id=_value("WPS_APP_ID"),
             wps_app_secret=_value("WPS_APP_SECRET"),
             wps_file_id=_value("WPS_FILE_ID"),
             wps_sheet_id=_value("WPS_SHEET_ID"),
-            wps_token_url=_value("WPS_TOKEN_URL"),
-            wps_records_url=_value("WPS_RECORDS_URL"),
+            wps_token_url=_value("WPS_TOKEN_URL", "https://openapi.wps.cn/oauth2/token"),
+            wps_kso_signing_enabled=_bool("WPS_KSO_SIGNING_ENABLED", False),
             wps_kso_secret=_value("WPS_KSO_SECRET"),
         )
 
@@ -114,8 +123,7 @@ def validate_runtime_configuration(settings: Settings) -> None:
         )))
     if settings.wps_mode == "real":
         missing.extend(_missing(settings, (
-            "wps_base_url", "wps_app_id", "wps_app_secret", "wps_file_id", "wps_sheet_id",
-            "wps_token_url", "wps_records_url",
+            "wps_app_id", "wps_app_secret", "wps_file_id", "wps_sheet_id",
         )))
     if missing:
         variables = ", ".join(name.upper() for name in missing)

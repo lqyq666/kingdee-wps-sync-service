@@ -4,7 +4,9 @@
 
 当前分支：`main`
 
-交接基线：`ecc94aff84e20ea9427b8b3979c6acba60012347`（`feat: align WPS client with self-built app API`）
+服务实现基线：`ecc94aff84e20ea9427b8b3979c6acba60012347`（`feat: align WPS client with self-built app API`）
+
+请从当前 `origin/main` 检出接手；该分支包含本交接文档及其后续格式修正。
 公开仓库：<https://github.com/lqyq666/kingdee-wps-sync-service>
 
 ## 交接结论
@@ -166,5 +168,5 @@ CI 文件为 `.github/workflows/ci.yml`，显式设置 `KINGDEE_MODE=mock` 和 `
 ## 给 Zcode 的第一条任务指令
 
 ```text
-接手 D:\金蝶-wps同步，先阅读 docs/ZCODE_HANDOFF_2026-09-15.md、README.md、docs/INTEGRATION_STATUS.md 和 docs/REAL_INTEGRATION_REQUIREMENTS.md。以 main@ecc94aff84e20ea9427b8b3979c6acba60012347 为基线，先执行 git status、python -m compileall app、pytest、docker build .。严禁读取或提交 .env/Secret，严禁声称真实金蝶或 WPS 已通过。优先实现并测试 WPS 按 _sync_key 的远端 reconciliation；只有拿到客户确认的 WPS 查询合同和脱敏样本后才编码真实查询。随后根据客户金蝶合同替换 RealKingdeeClient、填写经过 review 的 17 字段映射，并完成隔离测试表的真实验收证据。
+接手 D:\金蝶-wps同步，从当前 origin/main 检出，先阅读 docs/ZCODE_HANDOFF_2026-09-15.md、README.md、docs/INTEGRATION_STATUS.md 和 docs/REAL_INTEGRATION_REQUIREMENTS.md。服务实现基线为 ecc94aff84e20ea9427b8b3979c6acba60012347；先执行 git status、python -m compileall app、pytest、docker build .。严禁读取或提交 .env/Secret，严禁声称真实金蝶或 WPS 已通过。优先实现并测试 WPS 按 _sync_key 的远端 reconciliation；只有拿到客户确认的 WPS 查询合同和脱敏样本后才编码真实查询。随后根据客户金蝶合同替换 RealKingdeeClient、填写经过 review 的 17 字段映射，并完成隔离测试表的真实验收证据。
 ```

@@ -16,7 +16,7 @@ from app.config import Settings, validate_runtime_configuration
 from app.hashing import content_hash
 from app.integrations import SYNC_HASH_FIELD, KingdeeClient, WpsClient, WpsRemoteRecord, parse_timestamp
 from app.mapping import map_demo_source, map_real_source
-from app.metrics import DLQ_RECORDS, SYNC_DURATION, SYNC_RECORDS, SYNC_RUNS
+from app.metrics import DLQ_RECORDS, RECONCILED_RECORDS, SYNC_DURATION, SYNC_RECORDS, SYNC_RUNS
 from app.models import DeadLetter, SyncCheckpoint, SyncRecord, SyncRun, TaskLock
 from app.retry import retry_call
 
@@ -244,6 +244,9 @@ class SyncEngine:
                 counts["remote_id_resolved"] += 1
 
         session.commit()
+        for outcome, count in counts.items():
+            if count:
+                RECONCILED_RECORDS.labels(outcome=outcome).inc(count)
         logger.info("remote_reconciliation", extra={"event": "remote_reconciliation", **counts})
         return next_creates, next_updates
 

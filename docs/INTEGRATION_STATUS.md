@@ -10,7 +10,8 @@
 | 稳定 source key、content hash、幂等跳过 | Implemented | PostgreSQL `sync_records` 与重复 mock 运行 |
 | 批量 create/update、重试与 jitter | Implemented | 代码与单元测试 |
 | DLQ / replay、任务锁、dry-run | Implemented | 单元测试与 HTTP/CLI 接口 |
-| 按 `_sync_key` 回查 WPS 的跨系统对账与 crash recovery | Implemented (mock) | 故障注入测试：远端写入成功、本地提交前崩溃，再次运行与 DLQ replay 均不产生重复行 |
+| 按 `_sync_key` 回查 WPS 的跨系统对账与 crash recovery | Implemented (mock) | 故障注入测试：远端写入成功、本地提交前崩溃，再次运行与 DLQ replay 均不产生重复行；对账结果有 `kingdee_wps_sync_reconciled_records_total` 指标 |
+| 只读联调冒烟 CLI（token / schema / 字段就绪 / `_sync_key` 回查） | Implemented (mock) | `python -m app.smoke`；token 子命令已于 2026-09-15 在真实租户通过，schema/fields/lookup 待 `file_id` |
 | JSON 日志、Prometheus、health/readiness、webhook | Implemented | 服务实现；webhook 仅在配置后调用 |
 | Docker / Docker Compose / GitHub Actions | Implemented | 本仓库配置 |
 

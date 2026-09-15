@@ -63,6 +63,19 @@ docker compose down
 - [集成状态](docs/INTEGRATION_STATUS.md)
 - [真实联调准备清单](docs/REAL_INTEGRATION_REQUIREMENTS.md)
 
+## 联调冒烟（只读，不写入任何表）
+
+真实联调前用 `python -m app.smoke` 做只读检查，凭据来自环境变量（本机可 `set -a && . ./.env; set +a` 后运行，容器内 `docker compose exec sync-service python -m app.smoke ...`）：
+
+```powershell
+python -m app.smoke token                                                # 验证自建应用 token
+python -m app.smoke sheets --file-id <file_id>                           # 列出数据表，找到 sheet_id
+python -m app.smoke fields --file-id <file_id> [--sheet-id <id>]         # 核验 17 业务字段 + 3 技术字段是否就绪
+python -m app.smoke lookup --file-id <file_id> --sheet-id <id> --sync-key <key>   # 按 _sync_key 回查，演练对账
+```
+
+`fields` 会输出 `ready` 判定：20 个字段必须齐全，且 `_sync_key`/`_source_modified_at`/`_sync_hash` 必须是文本类型。所有冒烟命令均不发起 create/update。缺凭据时返回 `BLOCKED`。
+
 ## 本地质量检查
 
 ```powershell

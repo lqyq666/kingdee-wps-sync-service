@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from app import integrations
-from app.integrations import WpsOpenApiClient, WpsRemoteRecord, wps_kso1_authorization
+from app.integrations import WpsFieldSchema, WpsOpenApiClient, WpsRemoteRecord, WpsSheetSchema, wps_kso1_authorization
 
 
 def _real_client(settings, handler: httpx.MockTransport | object) -> WpsOpenApiClient:
@@ -167,3 +167,40 @@ def test_wps_find_records_rejects_rows_without_id_and_api_errors(settings):
         client.find_records_by_sync_keys(["order:1"])
     with pytest.raises(ValueError, match="40001"):
         client.find_records_by_sync_keys(["order:1"])
+
+
+def test_wps_get_schema_uses_documented_get_contract(settings):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.raw_path.decode() == "/v7/coop/dbsheet/file/schema"
+        assert request.method == "GET"
+        assert request.headers["authorization"] == "Bearer token-1"
+        return httpx.Response(200, json={"code": 0, "data": {"sheets": [
+            {"id": 3, "name": "销售数据详情表", "fields": [
+                {"name": "客户", "type": "MultiLineText", "id": "f1"},
+                {"name": "出厂价", "type": "Currency", "id": "f2"},
+            ]},
+            {"id": 9, "name": "临时表", "fields": []},
+        ]}})
+
+    client = _real_client(settings, _token_or(handler))
+
+    assert client.get_schema() == [
+        WpsSheetSchema(3, "销售数据详情表", [
+            WpsFieldSchema("客户", "MultiLineText", "f1"),
+            WpsFieldSchema("出厂价", "Currency", "f2"),
+        ]),
+        WpsSheetSchema(9, "临时表", []),
+    ]
+
+
+def test_wps_get_schema_rejects_api_errors_and_malformed_sheets(settings):
+    responses = iter([
+        {"code": 40003, "msg": "no file permission"},
+        {"code": 0, "data": {"sheets": [{"name": "missing id"}]}},
+    ])
+    client = _real_client(settings, _token_or(lambda request: httpx.Response(200, json=next(responses))))
+
+    with pytest.raises(ValueError, match="40003"):
+        client.get_schema()
+    with pytest.raises(ValueError, match="integer id"):
+        client.get_schema()

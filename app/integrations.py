@@ -62,6 +62,20 @@ class WpsRemoteRecord:
     fields: dict[str, object]
 
 
+@dataclass(frozen=True)
+class WpsFieldSchema:
+    name: str
+    type: str | None
+    field_id: str | None
+
+
+@dataclass(frozen=True)
+class WpsSheetSchema:
+    sheet_id: int
+    name: str
+    fields: list[WpsFieldSchema]
+
+
 class WpsClient(Protocol):
     def create_records(self, records: list[dict[str, object]]) -> dict[str, str]: ...
 
@@ -219,13 +233,17 @@ class WpsOpenApiClient:
         return headers
 
     @staticmethod
-    def _records(data: dict[str, object]) -> list[object]:
+    def _data_object(data: dict[str, object]) -> dict[str, object]:
         if data.get("code") not in {None, 0}:
             raise ValueError(f"WPS API error {data.get('code')}: {data.get('msg', 'unknown error')}")
         result = data.get("data", data)
         if not isinstance(result, dict):
             raise ValueError("WPS response data must be an object")
-        records = result.get("records")
+        return result
+
+    @classmethod
+    def _records(cls, data: dict[str, object]) -> list[object]:
+        records = cls._data_object(data).get("records")
         if not isinstance(records, list):
             raise ValueError("WPS response must contain a records list; verify tenant API contract")
         return records
@@ -261,6 +279,39 @@ class WpsOpenApiClient:
         if not isinstance(data, dict):
             raise ValueError("WPS response body must be a JSON object")
         return data
+
+    def _get_json(self, request_uri: str) -> dict[str, object]:
+        response = self.client.get(
+            f"{self.settings.wps_base_url.rstrip('/')}{request_uri}",
+            headers=self._headers(method="GET", request_uri=request_uri, payload=b""),
+        )
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, dict):
+            raise ValueError("WPS response body must be a JSON object")
+        return data
+
+    def get_schema(self) -> list[WpsSheetSchema]:
+        """Read the documented GET /v7/coop/dbsheet/{file_id}/schema (kso.dbsheet.read)."""
+        request_uri = f"/v7/coop/dbsheet/{quote(self.settings.wps_file_id, safe='')}/schema"
+        sheets = self._data_object(self._get_json(request_uri)).get("sheets")
+        if not isinstance(sheets, list):
+            raise ValueError("WPS schema response must contain a sheets list; verify tenant API contract")
+        parsed: list[WpsSheetSchema] = []
+        for sheet in sheets:
+            if not isinstance(sheet, dict) or not isinstance(sheet.get("id"), int):
+                raise ValueError("WPS schema sheet entries must contain an integer id; verify tenant API contract")
+            fields = sheet.get("fields")
+            parsed_fields = [
+                WpsFieldSchema(
+                    name=str(field.get("name", "")),
+                    type=str(field["type"]) if field.get("type") is not None else None,
+                    field_id=str(field["id"]) if field.get("id") is not None else None,
+                )
+                for field in fields if isinstance(field, dict)
+            ] if isinstance(fields, list) else []
+            parsed.append(WpsSheetSchema(sheet_id=sheet["id"], name=str(sheet.get("name", "")), fields=parsed_fields))
+        return parsed
 
     def _post_records(self, action: str, payload: dict[str, object], submitted_records: list[dict[str, object]]) -> dict[str, str]:
         return self._ids(self._post_json(action, payload), submitted_records)

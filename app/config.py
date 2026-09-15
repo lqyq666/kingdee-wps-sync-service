@@ -63,6 +63,7 @@ class Settings:
     kingdee_source_id_field: str
     kingdee_source_modified_at_field: str
     kingdee_kso_secret: str
+    wps_provider: str
     wps_base_url: str
     wps_app_id: str
     wps_app_secret: str
@@ -71,6 +72,15 @@ class Settings:
     wps_token_url: str
     wps_kso_signing_enabled: bool
     wps_kso_secret: str
+    kdocs_base_url: str
+    kdocs_app_id: str
+    kdocs_app_key: str
+    kdocs_access_token: str
+    kdocs_refresh_token: str
+    kdocs_file_token: str
+    kdocs_sheet_id: str
+    kdocs_api_family: str
+    kdocs_redirect_uri: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -103,6 +113,16 @@ class Settings:
             wps_token_url=_value("WPS_TOKEN_URL", "https://openapi.wps.cn/oauth2/token"),
             wps_kso_signing_enabled=_bool("WPS_KSO_SIGNING_ENABLED", False),
             wps_kso_secret=_value("WPS_KSO_SECRET"),
+            wps_provider=_value("WPS_PROVIDER", "wps365").lower(),
+            kdocs_base_url=_value("KDOCS_BASE_URL", "https://developer.kdocs.cn"),
+            kdocs_app_id=_value("KDOCS_APP_ID"),
+            kdocs_app_key=_value("KDOCS_APP_KEY"),
+            kdocs_access_token=_value("KDOCS_ACCESS_TOKEN"),
+            kdocs_refresh_token=_value("KDOCS_REFRESH_TOKEN"),
+            kdocs_file_token=_value("KDOCS_FILE_TOKEN"),
+            kdocs_sheet_id=_value("KDOCS_SHEET_ID"),
+            kdocs_api_family=_value("KDOCS_API_FAMILY", "dbt").lower(),
+            kdocs_redirect_uri=_value("KDOCS_REDIRECT_URI", "http://localhost:8931/callback"),
         )
 
 
@@ -116,6 +136,10 @@ def validate_runtime_configuration(settings: Settings) -> None:
         raise ConfigurationError("KINGDEE_MODE must be 'mock' or 'real'")
     if settings.wps_mode not in {"mock", "real"}:
         raise ConfigurationError("WPS_MODE must be 'mock' or 'real'")
+    if settings.wps_provider not in {"wps365", "kdocs"}:
+        raise ConfigurationError("WPS_PROVIDER must be 'wps365' or 'kdocs'")
+    if settings.kdocs_api_family not in {"dbt", "ksheet"}:
+        raise ConfigurationError("KDOCS_API_FAMILY must be 'dbt' or 'ksheet'")
 
     missing: list[str] = []
     if settings.kingdee_mode == "real":
@@ -123,9 +147,15 @@ def validate_runtime_configuration(settings: Settings) -> None:
             "kingdee_base_url", "kingdee_app_id", "kingdee_app_secret", "kingdee_form_id",
             "kingdee_sync_url", "kingdee_source_id_field", "kingdee_source_modified_at_field",
         )))
-    if settings.wps_mode == "real":
+    if settings.wps_mode == "real" and settings.wps_provider == "wps365":
         missing.extend(_missing(settings, (
             "wps_app_id", "wps_app_secret", "wps_file_id", "wps_sheet_id",
+        )))
+    if settings.wps_mode == "real" and settings.wps_provider == "kdocs":
+        # The kdocs record APIs authenticate with a user OAuth access token; app_id/app_key
+        # are only needed by the one-time `kdocs-auth` bootstrap, not at sync runtime.
+        missing.extend(_missing(settings, (
+            "kdocs_access_token", "kdocs_file_token", "kdocs_sheet_id",
         )))
     if missing:
         variables = ", ".join(name.upper() for name in missing)

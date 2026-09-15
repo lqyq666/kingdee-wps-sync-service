@@ -12,6 +12,7 @@
 | DLQ / replay、任务锁、dry-run | Implemented | 单元测试与 HTTP/CLI 接口 |
 | 按 `_sync_key` 回查 WPS 的跨系统对账与 crash recovery | Implemented (mock) | 故障注入测试：远端写入成功、本地提交前崩溃，再次运行与 DLQ replay 均不产生重复行；对账结果有 `kingdee_wps_sync_reconciled_records_total` 指标 |
 | 只读联调冒烟 CLI（token / schema / 字段就绪 / `_sync_key` 回查） | Implemented (mock) | `python -m app.smoke`；token 子命令已于 2026-09-15 在真实租户通过，schema/fields/lookup 待 `file_id` |
+| kdocs 适配层（`WPS_PROVIDER=kdocs`） | Implemented (mock) | `KdocsOpenApiClient` 按官方文档实现 records create/update、`complex_query` 回查、schemas、user/basic、个人文件列表，以及用户 OAuth 引导（`kdocs-auth`/`kdocs-refresh`，token 只写入本地 `.env`）；18 个新单测钉住请求/响应合同。**尚未在真实租户验证任何一步**（等 open.wps.cn「集成应用」创建，见 REAL_INTEGRATION_REQUIREMENTS 的引导步骤） |
 | JSON 日志、Prometheus、health/readiness、webhook | Implemented | 服务实现；webhook 仅在配置后调用 |
 | Docker / Docker Compose / GitHub Actions | Implemented | 本仓库配置 |
 
@@ -29,7 +30,7 @@
 
 ## 跨系统对账规则
 
-同步在正式写入前，对所有本地没有记录的行、以及本地有记录但缺少 `remote_record_id` 的行，按 `_sync_key` 批量回查 WPS（每组最多 50 个 `Equals` 条件，`OR` 组合，`page_size=1000` 翻页）。dry-run 不回查，只基于本地状态估算。
+同步在正式写入前，对所有本地没有记录的行、以及本地有记录但缺少 `remote_record_id` 的行，按 `_sync_key` 批量回查 WPS（wps365：每组最多 50 个 `Equals` 条件，`OR` 组合，`page_num`/`page_size` 翻页；kdocs：`complex_query` 每个条件只允许一个 `Equals` 值，因此每个 key 单独请求并按 `offset` 游标翻页）。dry-run 不回查，只基于本地状态估算。
 
 | 远端状态 | 处理 | 计数 |
 | --- | --- | --- |

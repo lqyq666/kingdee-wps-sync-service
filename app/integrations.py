@@ -54,6 +54,9 @@ SYNC_HASH_FIELD = "_sync_hash"
 # criteria-count limit, so keys are looked up in conservative OR-groups.
 WPS_QUERY_CRITERIA_BATCH = 50
 WPS_QUERY_PAGE_SIZE = 1000
+# The kdocs complex_query contract allows exactly one criterion per field and one value per
+# Equals criterion, so each _sync_key is queried on its own; page via the returned offset.
+KDOCS_QUERY_PAGE_SIZE = 1000
 
 
 @dataclass(frozen=True)
@@ -369,9 +372,223 @@ class WpsOpenApiClient:
         return found
 
 
+class KdocsOpenApiClient:
+    """kdocs open-platform client for dbt/ksheet record APIs (user OAuth access_token).
+
+    Contract sources: developer.kdocs.cn docs for 遍历记录/创建记录/批量更新记录/
+    遍历记录(复杂查询条件)/获取文档 Schema 信息 and the Web 授权 flow. All record APIs
+    authenticate with the authorized user's access_token query parameter — there is no
+    app-level client-credentials token on this platform.
+    """
+
+    def __init__(self, settings: Settings, client: httpx.Client | None = None):
+        self.settings = settings
+        self.client = client or httpx.Client(timeout=30)
+
+    def _request_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        payload: dict[str, object] | None = None,
+        params: dict[str, str] | None = None,
+    ) -> dict[str, object]:
+        response = self.client.request(
+            method,
+            f"{self.settings.kdocs_base_url.rstrip('/')}{path}",
+            params={"access_token": self.settings.kdocs_access_token, **(params or {})},
+            json=payload,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, dict):
+            raise ValueError("kdocs response body must be a JSON object; verify the API contract")
+        if data.get("code") not in {None, 0}:
+            detail = data.get("result") or data.get("msg") or "unknown error"
+            raise ValueError(f"kdocs API error {data.get('code')}: {detail}")
+        return data
+
+    def _detail(self, data: dict[str, object]) -> dict[str, object]:
+        body = data.get("data")
+        detail = body.get("detail") if isinstance(body, dict) else None
+        if not isinstance(detail, dict):
+            raise ValueError("kdocs response must contain data.detail; verify the API contract")
+        return detail
+
+    def _records_path(self) -> str:
+        file_token = quote(self.settings.kdocs_file_token, safe="")
+        return f"/api/v1/openapi/{self.settings.kdocs_api_family}/{file_token}/sheets/{self.settings.kdocs_sheet_id}/records"
+
+    def _schema_path(self) -> str:
+        file_token = quote(self.settings.kdocs_file_token, safe="")
+        return f"/api/v1/openapi/{self.settings.kdocs_api_family}/{file_token}/schemas"
+
+    @staticmethod
+    def _parse_records(detail: dict[str, object]) -> list[WpsRemoteRecord]:
+        records = detail.get("records")
+        if not isinstance(records, list):
+            raise ValueError("kdocs response must contain a records list; verify the API contract")
+        parsed: list[WpsRemoteRecord] = []
+        for record in records:
+            if not isinstance(record, dict) or not isinstance(record.get("id"), str) or not record["id"]:
+                raise ValueError("kdocs returned a record without id; verify the API contract")
+            fields = record.get("fields")
+            parsed.append(WpsRemoteRecord(record["id"], dict(fields) if isinstance(fields, dict) else {}))
+        return parsed
+
+    def _write_records(self, method: str, records: list[dict[str, object]]) -> dict[str, str]:
+        data = self._request_json(method, self._records_path(), payload={"records": records})
+        parsed = self._parse_records(self._detail(data))
+        submitted_keys = [str(record["fields"][SYNC_KEY_FIELD]) for record in records]
+        # The write contract echoes each record's fields; map by the echoed _sync_key when
+        # complete, and fall back to submitted order only when counts match.
+        by_echo = {
+            str(record.fields.get(SYNC_KEY_FIELD)): record.record_id
+            for record in parsed
+            if record.record_id and record.fields.get(SYNC_KEY_FIELD)
+        }
+        if set(by_echo) == set(submitted_keys):
+            return by_echo
+        if len(parsed) != len(submitted_keys):
+            raise ValueError("kdocs response record count does not match the submitted batch; verify the API contract")
+        return {
+            key: record.record_id or ""
+            for key, record in zip(submitted_keys, parsed, strict=True)
+        }
+
+    def create_records(self, records: list[dict[str, object]]) -> dict[str, str]:
+        return self._write_records("POST", [{"fields": record} for record in records])
+
+    def update_records(self, records: list[tuple[str, dict[str, object]]]) -> dict[str, str]:
+        return self._write_records("PUT", [{"id": remote_id, "fields": fields} for remote_id, fields in records])
+
+    def find_records_by_sync_keys(self, sync_keys: list[str]) -> dict[str, list[WpsRemoteRecord]]:
+        """Look up remote rows by _sync_key via the documented complex_query API.
+
+        Every matching row is returned so callers can detect duplicate remote keys
+        instead of silently picking one. One request per key plus offset-cursor pages.
+        """
+        found: dict[str, list[WpsRemoteRecord]] = {}
+        for key in dict.fromkeys(str(value) for value in sync_keys):
+            offset = ""
+            seen_offsets: set[str] = set()
+            while True:
+                payload: dict[str, object] = {
+                    "fields": [SYNC_KEY_FIELD, SYNC_HASH_FIELD],
+                    "filter": {
+                        "mode": "AND",
+                        "criteria": [{"field": SYNC_KEY_FIELD, "op": "Equals", "values": [key]}],
+                    },
+                    "pageSize": KDOCS_QUERY_PAGE_SIZE,
+                }
+                if offset:
+                    payload["offset"] = offset
+                detail = self._detail(
+                    self._request_json("POST", f"{self._records_path()}/complex_query", payload=payload)
+                )
+                for record in self._parse_records(detail):
+                    row_key = str(record.fields.get(SYNC_KEY_FIELD) or key)
+                    found.setdefault(row_key, []).append(record)
+                next_offset = detail.get("offset")
+                offset = str(next_offset) if next_offset else ""
+                if not offset:
+                    break
+                if offset in seen_offsets:
+                    raise ValueError("kdocs complex_query returned a repeated pagination offset")
+                seen_offsets.add(offset)
+        return found
+
+    def get_schema(self) -> list[WpsSheetSchema]:
+        """Read the documented GET /api/v1/openapi/{dbt|ksheet}/{file_token}/schemas."""
+        sheets = self._detail(self._request_json("GET", self._schema_path())).get("sheets")
+        if not isinstance(sheets, list):
+            raise ValueError("kdocs schemas response must contain a sheets list; verify the API contract")
+        parsed: list[WpsSheetSchema] = []
+        for sheet in sheets:
+            if not isinstance(sheet, dict) or not isinstance(sheet.get("id"), int):
+                raise ValueError("kdocs schema sheet entries must contain an integer id; verify the API contract")
+            fields = sheet.get("fields")
+            parsed_fields = [
+                WpsFieldSchema(
+                    name=str(field.get("name", "")),
+                    type=str(field["type"]) if field.get("type") is not None else None,
+                    field_id=str(field["id"]) if field.get("id") is not None else None,
+                )
+                for field in fields if isinstance(field, dict)
+            ] if isinstance(fields, list) else []
+            parsed.append(WpsSheetSchema(sheet_id=sheet["id"], name=str(sheet.get("name", "")), fields=parsed_fields))
+        return parsed
+
+    def get_user_basic(self) -> dict[str, object]:
+        """Read GET /api/v1/openapi/user/basic to validate the access_token without file access."""
+        body = self._request_json("GET", "/api/v1/openapi/user/basic").get("data")
+        detail = body.get("detail") if isinstance(body, dict) else None
+        info = detail if isinstance(detail, dict) else (body if isinstance(body, dict) else {})
+        return {name: info[name] for name in ("id", "name", "nickname", "avatar") if name in info}
+
+    def list_personal_files(self) -> list[dict[str, object]]:
+        """Read GET /api/v1/openapi/personal/files to discover file tokens by name."""
+        files = self._detail(self._request_json("GET", "/api/v1/openapi/personal/files")).get("files")
+        if not isinstance(files, list):
+            raise ValueError("kdocs personal files response must contain a files list; verify the API contract")
+        return [dict(file) for file in files if isinstance(file, dict)]
+
+
+def kdocs_authorize_url(settings: Settings, state: str) -> str:
+    """Build the Web 授权 page URL; scopes are comma-separated per the OAuth doc."""
+    return (
+        f"{settings.kdocs_base_url.rstrip('/')}/h5/auth"
+        f"?app_id={quote(settings.kdocs_app_id, safe='')}"
+        "&scope=access_personal_files%2Cedit_personal_files"
+        f"&redirect_uri={quote(settings.kdocs_redirect_uri, safe='')}"
+        f"&state={quote(state, safe='')}"
+    )
+
+
+def _kdocs_token_payload(data: dict[str, object]) -> dict[str, str]:
+    if not isinstance(data, dict) or data.get("code") not in {None, 0}:
+        detail = data.get("result") or "unknown error" if isinstance(data, dict) else "invalid response"
+        raise ValueError(f"kdocs token endpoint error {data.get('code') if isinstance(data, dict) else '?'}: {detail}")
+    body = data.get("data")
+    token = body.get("access_token") if isinstance(body, dict) else None
+    if not isinstance(token, str) or not token:
+        raise ValueError("kdocs token response must contain access_token; verify the app credentials")
+    refresh = body.get("refresh_token") if isinstance(body, dict) else None
+    return {"access_token": token, "refresh_token": str(refresh or "")}
+
+
+def kdocs_exchange_code(settings: Settings, code: str, client: httpx.Client | None = None) -> dict[str, str]:
+    """Exchange a Web 授权 code per GET /api/v1/oauth2/access_token (query params, no signing)."""
+    http = client or httpx.Client(timeout=30)
+    response = http.get(
+        f"{settings.kdocs_base_url.rstrip('/')}/api/v1/oauth2/access_token",
+        params={"code": code, "app_id": settings.kdocs_app_id, "app_key": settings.kdocs_app_key},
+    )
+    response.raise_for_status()
+    return _kdocs_token_payload(response.json())
+
+
+def kdocs_refresh_access_token(settings: Settings, client: httpx.Client | None = None) -> dict[str, str]:
+    """Refresh per POST /api/v1/oauth2/refresh_token (app_id in query, rest in JSON body)."""
+    if not settings.kdocs_refresh_token:
+        raise ValueError("KDOCS_REFRESH_TOKEN is required to refresh the access token")
+    http = client or httpx.Client(timeout=30)
+    response = http.post(
+        f"{settings.kdocs_base_url.rstrip('/')}/api/v1/oauth2/refresh_token",
+        params={"app_id": settings.kdocs_app_id},
+        json={"app_key": settings.kdocs_app_key, "refresh_token": settings.kdocs_refresh_token},
+    )
+    response.raise_for_status()
+    return _kdocs_token_payload(response.json())
+
+
 def build_kingdee_client(settings: Settings) -> KingdeeClient:
     return MockKingdeeClient() if settings.kingdee_mode == "mock" else RealKingdeeClient(settings)
 
 
 def build_wps_client(settings: Settings) -> WpsClient:
-    return MockWpsClient() if settings.wps_mode == "mock" else WpsOpenApiClient(settings)
+    if settings.wps_mode == "mock":
+        return MockWpsClient()
+    if settings.wps_provider == "kdocs":
+        return KdocsOpenApiClient(settings)
+    return WpsOpenApiClient(settings)

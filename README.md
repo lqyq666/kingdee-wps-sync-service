@@ -68,13 +68,21 @@ docker compose down
 真实联调前用 `python -m app.smoke` 做只读检查，凭据来自环境变量（本机可 `set -a && . ./.env; set +a` 后运行，容器内 `docker compose exec sync-service python -m app.smoke ...`）：
 
 ```powershell
+# WPS_PROVIDER=wps365（默认，open.wps.cn 企业自建应用）
 python -m app.smoke token                                                # 验证自建应用 token
 python -m app.smoke sheets --file-id <file_id>                           # 列出数据表，找到 sheet_id
 python -m app.smoke fields --file-id <file_id> [--sheet-id <id>]         # 核验 17 业务字段 + 3 技术字段是否就绪
 python -m app.smoke lookup --file-id <file_id> --sheet-id <id> --sync-key <key>   # 按 _sync_key 回查，演练对账
+
+# WPS_PROVIDER=kdocs（金山文档开放平台，集成应用 + 用户 OAuth）
+python -m app.smoke kdocs-auth                                           # 一次性授权引导，token 自动写入 .env（支持 --code 手动传入）
+python -m app.smoke kdocs-user                                           # 验证 access_token（user/basic）
+python -m app.smoke kdocs-files                                          # 列出个人文档，定位 file_token
+python -m app.smoke sheets --file-id <file_token>                        # 之后同上三步（sheets/fields/lookup）
+python -m app.smoke kdocs-refresh                                        # access_token 过期（24h）后刷新
 ```
 
-`fields` 会输出 `ready` 判定：20 个字段必须齐全，且 `_sync_key`/`_source_modified_at`/`_sync_hash` 必须是文本类型。所有冒烟命令均不发起 create/update。缺凭据时返回 `BLOCKED`。
+`fields` 会输出 `ready` 判定：20 个字段必须齐全，且 `_sync_key`/`_source_modified_at`/`_sync_hash` 必须是文本类型（wps365：`MultiLineText`/`Text`；kdocs：`MultiLineText`/`SingleLineText`）。除 `kdocs-auth`/`kdocs-refresh`（只换取并本地保存 token，不碰任何表）外，冒烟命令均不发起 create/update。缺凭据时返回 `BLOCKED`。
 
 ## 本地质量检查
 

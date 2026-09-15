@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from app.integrations import WpsFieldSchema, WpsSheetSchema
 from app.mapping import FIELD_MAPPINGS, TECHNICAL_WPS_FIELDS
-from app.smoke import build_field_report, main
+from app.smoke import build_field_report, main, upsert_env_values
 
 
 def _sheet(fields: list[tuple[str, str]]) -> WpsSheetSchema:
@@ -58,3 +60,45 @@ def test_smoke_cli_reports_missing_file_id(monkeypatch, capsys):
     monkeypatch.setenv("WPS_SHEET_ID", "")
     assert main(["sheets"]) == 2
     assert "file_id" in capsys.readouterr().out
+
+
+def test_smoke_kdocs_commands_are_blocked_without_their_credentials(monkeypatch, capsys):
+    monkeypatch.setenv("WPS_PROVIDER", "kdocs")
+    monkeypatch.setenv("KDOCS_APP_ID", "")
+    monkeypatch.setenv("KDOCS_APP_KEY", "")
+    monkeypatch.setenv("KDOCS_ACCESS_TOKEN", "")
+    monkeypatch.setenv("KDOCS_REFRESH_TOKEN", "")
+
+    assert main(["kdocs-auth"]) == 2
+    assert main(["kdocs-refresh"]) == 2
+    assert main(["kdocs-user"]) == 2
+    assert main(["kdocs-files"]) == 2
+    assert main(["sheets", "--file-id", "f"]) == 2
+
+    outputs = capsys.readouterr().out.splitlines()
+    assert len(outputs) == 5
+    assert "KDOCS_APP_ID" in outputs[0] and "KDOCS_REFRESH_TOKEN" in outputs[1]
+    assert all("BLOCKED" in line for line in outputs)
+
+
+def test_smoke_token_command_rejects_kdocs_provider(monkeypatch, capsys):
+    monkeypatch.setenv("WPS_PROVIDER", "kdocs")
+    monkeypatch.setenv("KDOCS_ACCESS_TOKEN", "t")
+    assert main(["token"]) == 2
+    assert "kdocs-user" in capsys.readouterr().out
+
+
+def test_upsert_env_values_creates_and_replaces_lines(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("WPS_PROVIDER=wps365\nKDOCS_ACCESS_TOKEN=old\n", encoding="utf-8")
+
+    upsert_env_values(env, {"KDOCS_ACCESS_TOKEN": "new", "KDOCS_REFRESH_TOKEN": "rt-1"})
+
+    assert env.read_text(encoding="utf-8") == (
+        "WPS_PROVIDER=wps365\n"
+        "KDOCS_ACCESS_TOKEN=new\n"
+        "KDOCS_REFRESH_TOKEN=rt-1\n"
+    )
+    fresh = tmp_path / "fresh.env"
+    upsert_env_values(fresh, {"KDOCS_APP_ID": "APP-1"})
+    assert fresh.read_text(encoding="utf-8") == "KDOCS_APP_ID=APP-1\n"

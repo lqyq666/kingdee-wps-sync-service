@@ -1,10 +1,33 @@
 # 真实 Kingdee / WPS 联调准备清单
 
-## 当前状态：BLOCKED（WPS 侧为版本墙，非凭据问题）
+## 当前状态：BLOCKED（WPS 侧为版本墙，非凭据问题）→ 已备好 kdocs 替代路径
 
-2026-09-15 真实联调结论：open.wps.cn 自建应用凭据有效、scope 配置成功、应用与目标文件同属「青云协序」企业；但该企业为体验版且未认证，企业文档类接口全部被 `interface_company_doc` 拒绝。社区证据指向需付费企业高级版。可行的开发路径是切换到金山文档开放平台（developer.kdocs.cn，`/api/v1/openapi/dbt/*` 轻维表/多维表格 API，AK/SK 签名鉴权），两个平台应用不通用；生产环境若采购 WPS 365 企业高级版，可切回 `WPS_PROVIDER=wps365`。
+2026-09-15 真实联调结论：open.wps.cn 自建应用凭据有效、scope 配置成功、应用与目标文件同属「青云协序」企业；但该企业为体验版且未认证，企业文档类接口全部被 `interface_company_doc` 拒绝。社区证据指向需付费企业高级版。生产环境若采购 WPS 365 企业高级版，保持 `WPS_PROVIDER=wps365` 即可。
 
-当前仓库 `.env`/`.env.example` 已预留 `WPS_PROVIDER`（`wps365`|`kdocs`）与 `KDOCS_APP_ID`/`KDOCS_AK`/`KDOCS_SK` 占位。
+可行的开发路径是金山文档开放平台（developer.kdocs.cn）的轻维表/数据表 API，已按官方文档实现为 `WPS_PROVIDER=kdocs`（`app/integrations.py` 的 `KdocsOpenApiClient`，mock 验证）。关键差异：
+
+| 项目 | WPS 365（`wps365`） | 金山文档开放平台（`kdocs`） |
+| --- | --- | --- |
+| 应用类型 | open.wps.cn「企业自建应用」 | open.wps.cn「创建应用 → **集成应用**」（“获取 AppKey 调用丰富 API”；无需再去已并入 open.wps.cn 的 developer.kdocs.cn 单独入驻） |
+| 鉴权 | `client_credentials` 应用 token（+ 可选 KSO-1 签名） | **用户 OAuth**：`GET /api/v1/oauth2/access_token?code&app_id&app_key`（免签名），access_token 24 小时、refresh_token 90 天；所有记录接口以 `access_token` 查询参数鉴权 |
+| 目标定位 | `WPS_FILE_ID` + `WPS_SHEET_ID` | `KDOCS_FILE_TOKEN` + `KDOCS_SHEET_ID`（整数），`KDOCS_API_FAMILY=dbt`（轻维表文件）或 `ksheet`（在线表格的数据表） |
+| 读 schema | `GET /v7/coop/dbsheet/{file_id}/schema` | `GET /api/v1/openapi/{dbt\|ksheet}/{file_token}/schemas` → `data.detail.sheets[]`（`id` 整数、`fields[].{id,name,type}`） |
+| 创建 / 更新 | `records/create` / `records/update`（`fields_value` JSON 字符串） | `POST` / `PUT …/sheets/{sheet_id}/records`（`records[].fields` 为普通对象，更新需带 `id`） |
+| `_sync_key` 回查 | `records/list_by_page`，`Equals` 条件按 50 个 OR 打包 | `POST …/records/complex_query`：**同一字段只能有一个条件，`Equals` 只能带一个值**，因此每个 key 单独一次请求；分页用响应里的 `offset` 游标 |
+| 文本字段类型 | `MultiLineText` / `Text` | `MultiLineText` / `SingleLineText` |
+| 配额 | 版本相关 | 官方文档：测试应用 1 万次/天，正式应用 1000 万次/天 |
+
+kdocs 路径尚未在真实租户验证过任何一步（应用尚待创建）；创建后按下述顺序做只读验证，每步都可用 `python -m app.smoke` 完成。
+
+## kdocs 引导步骤（管理员操作）
+
+1. open.wps.cn 开发者后台 →「创建应用」→ 选 **集成应用**，归属组织 青云协序。
+2. 在应用详情记录 **APPID** 与 **AppKey**，自行写入 `.env` 的 `KDOCS_APP_ID` / `KDOCS_APP_KEY`（不要在聊天中粘贴）。
+3. 在应用的「回调地址」中登记 `http://localhost:8931/callback`（与 `KDOCS_REDIRECT_URI` 一致）；开启用户授权 scope `access_personal_files`（访问个人文档）与 `edit_personal_files`（编辑文档内容）。
+4. `python -m app.smoke kdocs-auth`：终端打印授权链接，用**目标文件所属账号**登录授权，回调被本地一次性 HTTP 服务捕获后自动换取 token 并写入 `.env`（`KDOCS_ACCESS_TOKEN` / `KDOCS_REFRESH_TOKEN`）；若回调地址无法用 localhost，可 `kdocs-auth --code <code>` 手动传入。
+5. `python -m app.smoke kdocs-user` 验证 token；`python -m app.smoke kdocs-files` 列出个人文档定位 `file_token`（若「汇报」不在个人文档而在团队空间，需由文件所有者授权或把文件放到可见目录后再试）。
+6. 写入 `KDOCS_FILE_TOKEN` 后，`sheets` → `fields --sheet-id <id>` → `lookup --sync-key <key>` 三步只读通过，才允许把 `WPS_MODE=real WPS_PROVIDER=kdocs` 交给 dry-run，再对「测试」表做首次真实写入。
+7. access_token 过期（24 小时）后运行 `python -m app.smoke kdocs-refresh`。
 
 不要把 `.env`、token、私钥、抓包内容或客户数据提交到 Git，也不要在聊天中粘贴 Secret。
 
@@ -26,7 +49,7 @@
 4. 三个驾驶舱仅消费业务字段的确认；隐藏技术字段不得在驾驶舱展示或聚合。
 5. KSO-1（如要求）的官方签名规范和测试租户。
 
-服务会在 `WPS_MODE != mock` 时检查 `WPS_APP_ID`、`WPS_APP_SECRET`、`WPS_FILE_ID` 与 `WPS_SHEET_ID`。缺一个即明确失败，不会尝试真实请求。WPS 官方基础地址与 token 地址已有安全默认值；`WPS_KSO_SIGNING_ENABLED=true` 时，服务以 AppSecret 生成官方 KSO-1 签名。
+服务会在 `WPS_MODE != mock` 时按 `WPS_PROVIDER` 检查：`wps365` 需要 `WPS_APP_ID`、`WPS_APP_SECRET`、`WPS_FILE_ID` 与 `WPS_SHEET_ID`；`kdocs` 需要 `KDOCS_ACCESS_TOKEN`、`KDOCS_FILE_TOKEN` 与 `KDOCS_SHEET_ID`（`KDOCS_APP_ID`/`KDOCS_APP_KEY` 只在 `kdocs-auth`/`kdocs-refresh` 引导时使用）。缺一个即明确失败，不会尝试真实请求。WPS 官方基础地址与 token 地址已有安全默认值；`WPS_KSO_SIGNING_ENABLED=true` 时，服务以 AppSecret 生成官方 KSO-1 签名。
 
 ## WPS 销售主表必须新增的隐藏文本字段
 

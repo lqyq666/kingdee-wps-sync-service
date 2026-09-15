@@ -1,8 +1,10 @@
 # Zcode 继续开发交接：金蝶 ERP → WPS 365 同步服务
 
-更新时间：2026-09-15  
-当前分支：`main`  
-交接基线：`ecc94aff84e20ea9427b8b3979c6acba60012347`（`feat: align WPS client with self-built app API`）  
+更新时间：2026-09-15
+
+当前分支：`main`
+
+交接基线：`ecc94aff84e20ea9427b8b3979c6acba60012347`（`feat: align WPS client with self-built app API`）
 公开仓库：<https://github.com/lqyq666/kingdee-wps-sync-service>
 
 ## 交接结论

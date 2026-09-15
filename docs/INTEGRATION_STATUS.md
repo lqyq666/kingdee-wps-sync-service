@@ -20,7 +20,7 @@
 | 集成 | 状态 | 原因 |
 | --- | --- | --- |
 | Kingdee OpenAPI | **BLOCKED / REQUIRES REAL CREDENTIALS** | 没有客户 API 授权、端点合同、业务单据/字段元数据 |
-| WPS 365 OpenAPI | **BLOCKED / REQUIRES REAL CREDENTIALS** | 2026-09-15：自建应用凭据已由管理员在本机 `.env` 注入，`POST /oauth2/token`（`client_credentials`，未开启接口签名）已在真实租户成功返回 access_token；隔离测试表的 `file_id`、`sheet_id` 尚未提供，create/update/list_by_page 均未发起真实调用 |
+| WPS 365 OpenAPI | **BLOCKED / EDITION WALL** | 2026-09-15 联调结论：自建应用 `AK20260914LVLDLV` 已绑定「青云协序」企业（与目标文件同企业），token 与 scope 均正常；但企业为**体验版且未认证**，所有「企业文档」类接口（`/v7/links/*/meta`、`/v7/drives` 等）统一返回 `403000001 ErrPrivileges: interface_company_doc`。社区证据（bbs.wps.cn/topic/62081）表明该限制需付费企业高级版，与权限配置无关。`interface_company_doc` 系版本墙，非配置问题；文件侧 `file_id` 也已确认无法从 `/l/` 短链获得（网页地址栏即短链） |
 | WPS `records/list_by_page` 回查 | **BLOCKED / REQUIRES REAL CREDENTIALS** | 已按 [官方文档](https://open.wps.cn/documents/app-integration-dev/wps365/server/dbsheet/records/list-record-by-page) 编码 `filter.criteria` + `Equals` + 页码分页；未在真实表上验证筛选语义与 criteria 数量上限 |
 | KSO-1 | **BLOCKED / REQUIRES REAL CREDENTIALS** | 已按 WPS 官方签名说明实现；尚未持真实应用凭据发送请求验证 |
 | 真实字段映射 | **BLOCKED / REQUIRES REAL METADATA** | 17 个 WPS 目标字段固定，所有真实 source 字段刻意留空，禁止猜测 |

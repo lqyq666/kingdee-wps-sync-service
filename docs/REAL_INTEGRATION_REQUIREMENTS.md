@@ -1,8 +1,12 @@
 # 真实 Kingdee / WPS 联调准备清单
 
-## 当前状态：BLOCKED / REQUIRES REAL CREDENTIALS
+## 当前状态：BLOCKED（WPS 侧为版本墙，非凭据问题）
 
-当前仓库没有任何客户真实 Kingdee API 授权、字段元数据，也没有已获授权的 WPS AppSecret、file_id 或 sheet_id。不要把 `.env`、token、私钥、抓包内容或客户数据提交到 Git，也不要在聊天中粘贴 Secret。
+2026-09-15 真实联调结论：open.wps.cn 自建应用凭据有效、scope 配置成功、应用与目标文件同属「青云协序」企业；但该企业为体验版且未认证，企业文档类接口全部被 `interface_company_doc` 拒绝。社区证据指向需付费企业高级版。可行的开发路径是切换到金山文档开放平台（developer.kdocs.cn，`/api/v1/openapi/dbt/*` 轻维表/多维表格 API，AK/SK 签名鉴权），两个平台应用不通用；生产环境若采购 WPS 365 企业高级版，可切回 `WPS_PROVIDER=wps365`。
+
+当前仓库 `.env`/`.env.example` 已预留 `WPS_PROVIDER`（`wps365`|`kdocs`）与 `KDOCS_APP_ID`/`KDOCS_AK`/`KDOCS_SK` 占位。
+
+不要把 `.env`、token、私钥、抓包内容或客户数据提交到 Git，也不要在聊天中粘贴 Secret。
 
 ## Kingdee 需由客户/实施方提供
 

@@ -4,7 +4,19 @@ from dataclasses import replace
 
 import pytest
 
-from app.config import ConfigurationError, validate_runtime_configuration
+from app.config import ConfigurationError, Settings, validate_runtime_configuration
+
+
+def test_blank_environment_values_fall_back_to_official_defaults(monkeypatch):
+    monkeypatch.setenv("WPS_BASE_URL", "")
+    monkeypatch.setenv("WPS_TOKEN_URL", "   ")
+    monkeypatch.setenv("SYNC_BATCH_SIZE", "")
+
+    settings = Settings.from_env()
+
+    assert settings.wps_base_url == "https://openapi.wps.cn"
+    assert settings.wps_token_url == "https://openapi.wps.cn/oauth2/token"
+    assert settings.sync_batch_size == 100
 
 
 def test_real_kingdee_mode_reports_all_required_missing_items(settings):

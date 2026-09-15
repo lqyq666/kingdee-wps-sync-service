@@ -11,7 +11,9 @@ class ConfigurationError(ValueError):
 
 
 def _value(name: str, default: str = "") -> str:
-    return os.getenv(name, default).strip()
+    # A blank `NAME=` line in .env must not silently erase an official default such as the WPS URLs.
+    value = os.getenv(name, "").strip()
+    return value or default
 
 
 def _int(name: str, default: int) -> int:

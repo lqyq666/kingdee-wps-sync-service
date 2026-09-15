@@ -48,10 +48,26 @@ class KingdeeClient(Protocol):
     def fetch_since(self, since: datetime | None) -> list[dict[str, object]]: ...
 
 
+SYNC_KEY_FIELD = "_sync_key"
+SYNC_HASH_FIELD = "_sync_hash"
+# The list_by_page contract accepts one value per Equals criterion and does not document a
+# criteria-count limit, so keys are looked up in conservative OR-groups.
+WPS_QUERY_CRITERIA_BATCH = 50
+WPS_QUERY_PAGE_SIZE = 1000
+
+
+@dataclass(frozen=True)
+class WpsRemoteRecord:
+    record_id: str | None
+    fields: dict[str, object]
+
+
 class WpsClient(Protocol):
     def create_records(self, records: list[dict[str, object]]) -> dict[str, str]: ...
 
     def update_records(self, records: list[tuple[str, dict[str, object]]]) -> dict[str, str]: ...
+
+    def find_records_by_sync_keys(self, sync_keys: list[str]) -> dict[str, list[WpsRemoteRecord]]: ...
 
 
 MOCK_SALES_DETAILS: tuple[dict[str, object], ...] = (
@@ -96,12 +112,29 @@ class MockKingdeeClient:
 
 
 class MockWpsClient:
-    """Mock WPS returns deterministic ids; durable state is held by SyncRecord."""
+    """Mock WPS returns deterministic ids; an optional shared store simulates the remote table."""
+    def __init__(self, store: dict[str, list[WpsRemoteRecord]] | None = None):
+        self.store: dict[str, list[WpsRemoteRecord]] = store if store is not None else {}
+
     def create_records(self, records: list[dict[str, object]]) -> dict[str, str]:
-        return {str(record["_sync_key"]): f"mock-{record['_sync_key']}" for record in records}
+        ids: dict[str, str] = {}
+        for record in records:
+            key = str(record[SYNC_KEY_FIELD])
+            remote_id = f"mock-{key}"
+            self.store.setdefault(key, []).append(WpsRemoteRecord(remote_id, dict(record)))
+            ids[key] = remote_id
+        return ids
 
     def update_records(self, records: list[tuple[str, dict[str, object]]]) -> dict[str, str]:
-        return {str(fields["_sync_key"]): remote_id for remote_id, fields in records}
+        ids: dict[str, str] = {}
+        for remote_id, fields in records:
+            key = str(fields[SYNC_KEY_FIELD])
+            self.store[key] = [WpsRemoteRecord(remote_id, dict(fields))]
+            ids[key] = remote_id
+        return ids
+
+    def find_records_by_sync_keys(self, sync_keys: list[str]) -> dict[str, list[WpsRemoteRecord]]:
+        return {key: list(self.store[key]) for key in sync_keys if key in self.store}
 
 
 class RealKingdeeClient:
@@ -186,7 +219,7 @@ class WpsOpenApiClient:
         return headers
 
     @staticmethod
-    def _ids(data: dict[str, object], submitted_records: list[dict[str, object]]) -> dict[str, str]:
+    def _records(data: dict[str, object]) -> list[object]:
         if data.get("code") not in {None, 0}:
             raise ValueError(f"WPS API error {data.get('code')}: {data.get('msg', 'unknown error')}")
         result = data.get("data", data)
@@ -195,6 +228,11 @@ class WpsOpenApiClient:
         records = result.get("records")
         if not isinstance(records, list):
             raise ValueError("WPS response must contain a records list; verify tenant API contract")
+        return records
+
+    @staticmethod
+    def _ids(data: dict[str, object], submitted_records: list[dict[str, object]]) -> dict[str, str]:
+        records = WpsOpenApiClient._records(data)
         ids: dict[str, str] = {}
         if len(records) != len(submitted_records):
             raise ValueError("WPS response record count does not match the submitted batch")
@@ -210,7 +248,7 @@ class WpsOpenApiClient:
         file_id = quote(self.settings.wps_file_id, safe="")
         return f"/v7/coop/dbsheet/{file_id}/sheets/{self.settings.wps_sheet_id}/records/{action}"
 
-    def _post_records(self, action: str, payload: dict[str, object], submitted_records: list[dict[str, object]]) -> dict[str, str]:
+    def _post_json(self, action: str, payload: dict[str, object]) -> dict[str, object]:
         request_uri = self._records_uri(action)
         encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         response = self.client.post(
@@ -219,7 +257,13 @@ class WpsOpenApiClient:
             headers=self._headers(method="POST", request_uri=request_uri, payload=encoded),
         )
         response.raise_for_status()
-        return self._ids(response.json(), submitted_records)
+        data = response.json()
+        if not isinstance(data, dict):
+            raise ValueError("WPS response body must be a JSON object")
+        return data
+
+    def _post_records(self, action: str, payload: dict[str, object], submitted_records: list[dict[str, object]]) -> dict[str, str]:
+        return self._ids(self._post_json(action, payload), submitted_records)
 
     def create_records(self, records: list[dict[str, object]]) -> dict[str, str]:
         payload = {
@@ -238,6 +282,40 @@ class WpsOpenApiClient:
             ],
         }
         return self._post_records("update", payload, submitted_records)
+
+    def find_records_by_sync_keys(self, sync_keys: list[str]) -> dict[str, list[WpsRemoteRecord]]:
+        """Look up remote rows by the hidden _sync_key field via the documented list_by_page API.
+
+        Every matching row is returned, so callers can detect duplicate remote keys instead of
+        silently picking one.
+        """
+        found: dict[str, list[WpsRemoteRecord]] = {}
+        unique_keys = list(dict.fromkeys(str(key) for key in sync_keys))
+        for start in range(0, len(unique_keys), WPS_QUERY_CRITERIA_BATCH):
+            criteria = [
+                {"field": SYNC_KEY_FIELD, "operator": "Equals", "values": [key]}
+                for key in unique_keys[start:start + WPS_QUERY_CRITERIA_BATCH]
+            ]
+            page_num = 1
+            while True:
+                payload: dict[str, object] = {
+                    "fields": [SYNC_KEY_FIELD, SYNC_HASH_FIELD],
+                    "filter": {"mode": "OR", "criteria": criteria},
+                    "page_num": page_num,
+                    "page_size": WPS_QUERY_PAGE_SIZE,
+                }
+                records = self._records(self._post_json("list_by_page", payload))
+                for record in records:
+                    if not isinstance(record, dict) or not isinstance(record.get("id"), str) or not record["id"]:
+                        raise ValueError("WPS list_by_page returned a record without id; verify tenant API contract")
+                    fields = record.get("fields")
+                    fields = dict(fields) if isinstance(fields, dict) else {}
+                    key = str(fields.get(SYNC_KEY_FIELD) or "")
+                    found.setdefault(key, []).append(WpsRemoteRecord(record["id"], fields))
+                if len(records) < WPS_QUERY_PAGE_SIZE:
+                    break
+                page_num += 1
+        return found
 
 
 def build_kingdee_client(settings: Settings) -> KingdeeClient:

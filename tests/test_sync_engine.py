@@ -29,6 +29,9 @@ def test_checkpoint_only_advances_after_a_successful_run(settings, sessions):
         def update_records(self, records):
             raise RuntimeError("WPS unavailable")
 
+        def find_records_by_sync_keys(self, sync_keys):
+            raise RuntimeError("WPS unavailable")
+
     failing = SyncEngine(settings, sessions, MockKingdeeClient(), FailingWps())
     assert failing.run().status == "FAILED"
     with sessions() as session:
@@ -47,6 +50,9 @@ def test_dlq_entries_can_be_replayed(settings, sessions):
 
         def update_records(self, records):
             raise RuntimeError("WPS unavailable")
+
+        def find_records_by_sync_keys(self, sync_keys):
+            return {}
 
     failed_engine = SyncEngine(settings, sessions, MockKingdeeClient([MOCK_SALES_DETAILS[0]]), FailingWps())
     assert failed_engine.run().status == "FAILED"
@@ -72,6 +78,9 @@ def test_only_unfinished_batches_are_added_to_dlq(settings, sessions):
 
         def update_records(self, records):
             return MockWpsClient().update_records(records)
+
+        def find_records_by_sync_keys(self, sync_keys):
+            return {}
 
     engine = SyncEngine(
         replace(settings, sync_batch_size=1), sessions, MockKingdeeClient(), Fails_on_second_create()

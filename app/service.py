@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Callable
 
@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.alerts import send_failure_alert
 from app.config import Settings, validate_runtime_configuration
 from app.hashing import content_hash
-from app.integrations import KingdeeClient, WpsClient, parse_timestamp
+from app.integrations import SYNC_HASH_FIELD, KingdeeClient, WpsClient, WpsRemoteRecord, parse_timestamp
 from app.mapping import map_demo_source, map_real_source
 from app.metrics import DLQ_RECORDS, SYNC_DURATION, SYNC_RECORDS, SYNC_RUNS
 from app.models import DeadLetter, SyncCheckpoint, SyncRecord, SyncRun, TaskLock
@@ -159,6 +159,94 @@ class SyncEngine:
     def _batches(self, operations: list[RecordOperation]) -> list[list[RecordOperation]]:
         return [operations[start:start + self.settings.sync_batch_size] for start in range(0, len(operations), self.settings.sync_batch_size)]
 
+    def _find_remote(self, sync_keys: list[str]) -> dict[str, list[WpsRemoteRecord]]:
+        return retry_call(
+            lambda: self.wps.find_records_by_sync_keys(sync_keys),
+            attempts=self.settings.sync_max_attempts,
+            base_seconds=self.settings.sync_retry_base_seconds,
+        )
+
+    @staticmethod
+    def _single_remote_match(sync_key: str, matches: list[WpsRemoteRecord]) -> WpsRemoteRecord | None:
+        """Return the one usable remote row, or raise for states that need manual review."""
+        if len(matches) > 1:
+            raise ValueError(f"remote_reconciliation_conflict: {len(matches)} WPS records share _sync_key {sync_key}")
+        if matches and not matches[0].record_id:
+            raise ValueError(f"remote_reconciliation_conflict: WPS record for _sync_key {sync_key} has no id")
+        return matches[0] if matches else None
+
+    def _backfill_local_record(self, session: Session, operation: RecordOperation, remote: WpsRemoteRecord) -> SyncRecord:
+        # Store the hash WPS actually holds: if the follow-up update never happens, the next
+        # run still sees the row as changed instead of skipping it.
+        record = SyncRecord(
+            sync_key=operation.sync_key,
+            remote_record_id=remote.record_id,
+            source_modified_at=operation.source_modified_at,
+            content_hash=str(remote.fields.get(SYNC_HASH_FIELD) or ""),
+            synced_at=datetime.now(UTC),
+        )
+        session.add(record)
+        return record
+
+    def _reconcile_remote_state(
+        self,
+        session: Session,
+        creates: list[RecordOperation],
+        updates: list[RecordOperation],
+        result: SyncResult,
+    ) -> tuple[list[RecordOperation], list[RecordOperation]]:
+        """Query WPS by _sync_key before writing so a row created remotely but never committed
+        locally is adopted instead of created twice, and a local row without a remote id is
+        re-resolved or recreated."""
+        unresolved_updates = [operation for operation in updates if operation.existing is not None and not operation.existing.remote_record_id]
+        lookup_keys = [operation.sync_key for operation in [*creates, *unresolved_updates]]
+        if not lookup_keys:
+            return creates, updates
+        found = self._find_remote(lookup_keys)
+        unresolved_keys = {operation.sync_key for operation in unresolved_updates}
+        next_creates: list[RecordOperation] = []
+        next_updates: list[RecordOperation] = [operation for operation in updates if operation.sync_key not in unresolved_keys]
+        counts = {"adopted_unchanged": 0, "adopted_changed": 0, "remote_id_resolved": 0, "recreated": 0, "conflicts": 0}
+
+        for operation in creates:
+            try:
+                remote = self._single_remote_match(operation.sync_key, found.get(operation.sync_key, []))
+            except ValueError as exc:
+                self._add_dead_letters(session, [operation], str(exc))
+                counts["conflicts"] += 1
+                continue
+            if remote is None:
+                next_creates.append(operation)
+                continue
+            record = self._backfill_local_record(session, operation, remote)
+            if record.content_hash == operation.content_hash:
+                result.skipped += 1
+                counts["adopted_unchanged"] += 1
+            else:
+                next_updates.append(replace(operation, existing=record))
+                counts["adopted_changed"] += 1
+
+        for operation in unresolved_updates:
+            assert operation.existing is not None
+            try:
+                remote = self._single_remote_match(operation.sync_key, found.get(operation.sync_key, []))
+            except ValueError as exc:
+                self._add_dead_letters(session, [operation], str(exc))
+                counts["conflicts"] += 1
+                continue
+            if remote is None:
+                # The local row keeps its identity; the create batch fills in the new remote id.
+                next_creates.append(operation)
+                counts["recreated"] += 1
+            else:
+                operation.existing.remote_record_id = remote.record_id
+                next_updates.append(operation)
+                counts["remote_id_resolved"] += 1
+
+        session.commit()
+        logger.info("remote_reconciliation", extra={"event": "remote_reconciliation", **counts})
+        return next_creates, next_updates
+
     def _mark_run(self, session: Session, run: SyncRun, result: SyncResult) -> None:
         run.finished_at = datetime.now(UTC)
         run.status = result.status
@@ -213,6 +301,8 @@ class SyncEngine:
                         self._mark_run(session, run, result)
                         SYNC_RUNS.labels(status=result.status).inc()
                         return result
+
+                    creates, updates = self._reconcile_remote_state(session, creates, updates, result)
 
                     # Commit the local state of every successful remote batch. If a later
                     # batch fails, DLQ replay contains only records not yet persisted.
@@ -288,22 +378,30 @@ class SyncEngine:
                     modified_at = parse_timestamp(payload["source_modified_at"])
                     field_hash = payload["content_hash"]
                     existing = session.scalar(select(SyncRecord).where(SyncRecord.sync_key == sync_key))
-                    if existing:
+                    remote_id = existing.remote_record_id if existing else None
+                    if not remote_id:
+                        # Replayed rows may already exist in WPS if the original run crashed
+                        # after the remote write; a conflict leaves the entry PENDING for review.
+                        remote = self._single_remote_match(sync_key, self._find_remote([sync_key]).get(sync_key, []))
+                        remote_id = remote.record_id if remote else None
+                    if remote_id:
                         remote_ids = retry_call(
-                            lambda: self.wps.update_records([(str(existing.remote_record_id), fields)]),
+                            lambda remote_id=remote_id: self.wps.update_records([(str(remote_id), fields)]),
                             attempts=self.settings.sync_max_attempts,
                             base_seconds=self.settings.sync_retry_base_seconds,
                         )
-                        existing.remote_record_id = remote_ids[sync_key]
-                        existing.content_hash = field_hash
-                        existing.source_modified_at = modified_at
-                        existing.synced_at = datetime.now(UTC)
                     else:
                         remote_ids = retry_call(
                             lambda: self.wps.create_records([fields]),
                             attempts=self.settings.sync_max_attempts,
                             base_seconds=self.settings.sync_retry_base_seconds,
                         )
+                    if existing:
+                        existing.remote_record_id = remote_ids[sync_key]
+                        existing.content_hash = field_hash
+                        existing.source_modified_at = modified_at
+                        existing.synced_at = datetime.now(UTC)
+                    else:
                         session.add(SyncRecord(
                             sync_key=sync_key, remote_record_id=remote_ids[sync_key], source_modified_at=modified_at,
                             content_hash=field_hash, synced_at=datetime.now(UTC),

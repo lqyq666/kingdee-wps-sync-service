@@ -48,6 +48,7 @@ docker compose down
 - 规范 JSON content hash，重复数据跳过、变更数据批量 update、新数据批量 create。
 - PostgreSQL 持久化同步记录、任务锁、运行审计、checkpoint 与 DLQ。
 - 指数退避 + full jitter 重试，失败写入 DLQ，可显式 replay。
+- 跨系统对账：正式写入前按隐藏字段 `_sync_key` 回查 WPS（官方 `records/list_by_page` 接口），远端已存在但本地未提交的行会被收编为 update/skip 而不是重复 create；远端同 key 多行、无 id 等冲突进入 DLQ 等待人工处置。
 - JSON 结构化日志、Prometheus 指标、liveness/readiness 与可选 webhook 失败告警。
 - WPS 365 自建应用 token 内存缓存与可选 KSO-1 签名，按 WPS 官方 `client_credentials`、`X-Kso-Date`、`X-Kso-Authorization` 合同实现；真实租户仍未发起调用。
 

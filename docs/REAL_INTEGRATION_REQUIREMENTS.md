@@ -16,9 +16,9 @@
 
 ## WPS 需由客户管理员提供
 
-1. WPS 365 企业自建应用的 AppID/AppSecret、`kso.dbsheet.readwrite` scope、管理员授权状态，以及是否开启“接口签名”。
+1. WPS 365 企业自建应用的 AppID/AppSecret、`kso.dbsheet.readwrite` scope（回查用到的 `records/list_by_page` 要求 `kso.dbsheet.read` 或 `readwrite`，以及目标文件的读权限）、管理员授权状态，以及是否开启“接口签名”。
 2. 销售数据详情表的 `file_id`、`sheet_id`，以及创建/更新记录的正式文档和脱敏成功响应。当前官方自建应用 token 使用 `POST https://openapi.wps.cn/oauth2/token` + `client_credentials`；记录写入使用 WPS 365 OpenAPI 的 DBSheet create/update 路径。
-3. API 的批量限制、限流策略、错误码、请求幂等策略，以及有无按字段查询记录能力。
+3. API 的批量限制、限流策略、错误码、请求幂等策略。按字段查询记录已按官方 [`records/list_by_page`](https://open.wps.cn/documents/app-integration-dev/wps365/server/dbsheet/records/list-record-by-page) 实现（`filter.criteria` + `Equals` 文本匹配 + `page_num`/`page_size` 分页）；仍需管理员确认单次请求 `criteria` 数量上限（代码默认每组 50 个），必要时下调。
 4. 三个驾驶舱仅消费业务字段的确认；隐藏技术字段不得在驾驶舱展示或聚合。
 5. KSO-1（如要求）的官方签名规范和测试租户。
 

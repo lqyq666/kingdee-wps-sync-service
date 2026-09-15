@@ -5,8 +5,34 @@ from dataclasses import replace
 from urllib.parse import parse_qs
 
 import httpx
+import pytest
 
-from app.integrations import WpsOpenApiClient, wps_kso1_authorization
+from app import integrations
+from app.integrations import WpsOpenApiClient, WpsRemoteRecord, wps_kso1_authorization
+
+
+def _real_client(settings, handler: httpx.MockTransport | object) -> WpsOpenApiClient:
+    return WpsOpenApiClient(
+        replace(
+            settings,
+            wps_mode="real",
+            wps_base_url="https://openapi.wps.cn",
+            wps_app_id="AK-test",
+            wps_app_secret="test-secret",
+            wps_file_id="file",
+            wps_sheet_id="3",
+        ),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+
+def _token_or(handler):
+    def routed(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth2/token":
+            return httpx.Response(200, json={"access_token": "token-1", "expires_in": 7200})
+        return handler(request)
+
+    return routed
 
 
 def test_wps_kso1_authorization_matches_a_fixed_canonicalization_vector():
@@ -89,3 +115,55 @@ def test_wps_update_uses_documented_post_update_contract(settings):
     )
 
     assert client.update_records([("rec-1", {"_sync_key": "order:1", "客户": "已更新"})]) == {"order:1": "rec-1"}
+
+
+def test_wps_find_records_by_sync_keys_uses_documented_list_by_page_contract(settings, monkeypatch):
+    monkeypatch.setattr(integrations, "WPS_QUERY_CRITERIA_BATCH", 2)
+    monkeypatch.setattr(integrations, "WPS_QUERY_PAGE_SIZE", 2)
+    payloads: list[dict[str, object]] = []
+
+    def row(record_id: str, key: str, digest: str) -> dict[str, object]:
+        return {"id": record_id, "fields": {"_sync_key": key, "_sync_hash": digest}}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v7/coop/dbsheet/file/sheets/3/records/list_by_page"
+        assert request.method == "POST"
+        assert request.headers["authorization"] == "Bearer token-1"
+        payload = json.loads(request.content)
+        payloads.append(payload)
+        keys = [criterion["values"][0] for criterion in payload["filter"]["criteria"]]
+        if keys == ["order:1", "order:2"]:
+            pages = {1: [row("rec-1", "order:1", "h1"), row("rec-1b", "order:1", "h1")], 2: [row("rec-2", "order:2", "h2")]}
+            return httpx.Response(200, json={"code": 0, "data": {"records": pages[payload["page_num"]]}})
+        assert keys == ["order:3"]
+        return httpx.Response(200, json={"code": 0, "data": {"records": []}})
+
+    found = _real_client(settings, _token_or(handler)).find_records_by_sync_keys(["order:1", "order:2", "order:1", "order:3"])
+
+    assert found == {
+        "order:1": [
+            WpsRemoteRecord("rec-1", {"_sync_key": "order:1", "_sync_hash": "h1"}),
+            WpsRemoteRecord("rec-1b", {"_sync_key": "order:1", "_sync_hash": "h1"}),
+        ],
+        "order:2": [WpsRemoteRecord("rec-2", {"_sync_key": "order:2", "_sync_hash": "h2"})],
+    }
+    # Two OR-groups of at most two keys; the first group needed a second page.
+    assert [(payload["page_num"], len(payload["filter"]["criteria"])) for payload in payloads] == [(1, 2), (2, 2), (1, 1)]
+    for payload in payloads:
+        assert payload["fields"] == ["_sync_key", "_sync_hash"]
+        assert payload["filter"]["mode"] == "OR"
+        assert payload["page_size"] == 2
+        assert all(criterion["field"] == "_sync_key" and criterion["operator"] == "Equals" for criterion in payload["filter"]["criteria"])
+
+
+def test_wps_find_records_rejects_rows_without_id_and_api_errors(settings):
+    responses = iter([
+        {"code": 0, "data": {"records": [{"fields": {"_sync_key": "order:1"}}]}},
+        {"code": 40001, "msg": "permission denied"},
+    ])
+    client = _real_client(settings, _token_or(lambda request: httpx.Response(200, json=next(responses))))
+
+    with pytest.raises(ValueError, match="without id"):
+        client.find_records_by_sync_keys(["order:1"])
+    with pytest.raises(ValueError, match="40001"):
+        client.find_records_by_sync_keys(["order:1"])
